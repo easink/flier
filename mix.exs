@@ -22,9 +22,11 @@ defmodule Flier.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.37.1", optional: true, runtime: false}
+      {:rustler, "~> 0.37.1", optional: true, runtime: false},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
       # {:rustler_precompiled, "~> 0.7"},
+      {:tidewave, "~> 0.5", only: :dev},
+      {:bandit, "~> 1.0", only: :dev}
     ]
   end
 
@@ -37,7 +39,9 @@ defmodule Flier.MixProject do
       "rust.lint": [
         "cmd cargo clippy --manifest-path=native/flier_inotify/Cargo.toml -- -Dwarnings"
       ],
-      "rust.fmt": ["cmd cargo fmt --manifest-path=native/flier_inotify/Cargo.toml --all"]
+      "rust.fmt": ["cmd cargo fmt --manifest-path=native/flier_inotify/Cargo.toml --all"],
+      tidewave:
+        "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, ip: {127, 0, 0, 1}, port: 4000) end)'"
     ]
   end
 end

@@ -1,10 +1,11 @@
 // extern crate inotify;
 
 use inotify::{EventMask, Inotify, WatchMask};
-// use rustler::resource::ResourceArc;
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use rustler::{
     Atom, Encoder, Env, Error, LocalPid, Monitor, NifResult, OwnedEnv, Resource, ResourceArc, Term,
 };
+use std::os::unix::io::AsFd;
 
 use std::boxed::Box;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -174,39 +175,55 @@ fn start_watcher<'a>(
         let _ = tx.send(Ok(ok()));
 
         let mut buffer = [0; 1024];
+
+        // Use poll() for efficient waiting instead of busy-polling
+        let poll_timeout = PollTimeout::from(100u16); // 100ms timeout
+
         while running_clone.load(Ordering::SeqCst) {
-            println!(".\r");
-            match inotify.read_events(&mut buffer) {
-                Ok(events) => {
-                    for event in events {
-                        println!("start event\r\n");
-                        let filename = event
-                            .name
-                            .and_then(|os_str| os_str.to_str().map(|s| s.to_string()))
-                            .unwrap_or_else(|| "".to_string());
+            // Create PollFd for the inotify file descriptor
+            let mut poll_fds = [PollFd::new(inotify.as_fd(), PollFlags::POLLIN)];
 
-                        let mask_atoms = mask_to_atoms(event.mask);
+            match poll(&mut poll_fds, poll_timeout) {
+                Ok(0) => {
+                    // Timeout - no events, loop back to check running flag
+                    continue;
+                }
+                Ok(_) => {
+                    // Events available, read them
+                    match inotify.read_events(&mut buffer) {
+                        Ok(events) => {
+                            for event in events {
+                                let filename = event
+                                    .name
+                                    .and_then(|os_str| os_str.to_str().map(|s| s.to_string()))
+                                    .unwrap_or_else(|| "".to_string());
 
-                        let sent = OwnedEnv::send_and_clear(&mut owned_env, &pid, |env| {
-                            println!("sent event\r\n");
-                            (inotify_event(), filename, mask_atoms).encode(env)
-                        });
-                        if sent.is_err() {
-                            running_clone.store(false, Ordering::SeqCst);
+                                let mask_atoms = mask_to_atoms(event.mask);
+
+                                let sent = OwnedEnv::send_and_clear(&mut owned_env, &pid, |env| {
+                                    (inotify_event(), filename, mask_atoms).encode(env)
+                                });
+                                if sent.is_err() {
+                                    running_clone.store(false, Ordering::SeqCst);
+                                }
+
+                                if !running_clone.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                            }
                         }
-
-                        if !running_clone.load(Ordering::SeqCst) {
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Spurious wakeup, continue polling
+                            continue;
+                        }
+                        Err(_err) => {
+                            // inotify read error, exit loop
                             break;
                         }
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    continue;
-                }
-                Err(_err) => {
-                    println!("a");
-                    let _ = tx.send(Err(inotify_error()));
+                Err(_) => {
+                    // Poll error, exit loop
                     break;
                 }
             }
