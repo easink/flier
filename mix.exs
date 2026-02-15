@@ -1,0 +1,43 @@
+defmodule Flier.MixProject do
+  use Mix.Project
+
+  def project do
+    [
+      app: :flier,
+      version: "0.0.1",
+      elixir: "~> 1.17",
+      start_permanent: Mix.env() == :prod,
+      deps: deps(),
+      aliases: aliases()
+    ]
+  end
+
+  # Run "mix help compile.app" to learn about applications.
+  def application do
+    [
+      extra_applications: [:logger]
+    ]
+  end
+
+  # Run "mix help deps" to learn about dependencies.
+  defp deps do
+    [
+      {:rustler, "~> 0.37.1", optional: true, runtime: false}
+      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      # {:rustler_precompiled, "~> 0.7"},
+    ]
+  end
+
+  defp aliases do
+    [
+      # setup: ["deps.get", "compile"],
+      # "deps.vendorize": ["cmd cp -rv ../autumn/native/autumn native/comrak_nif/vendor"],
+      # "gen.checksum": "rustler_precompiled.download MDEx.Native --all --print",
+      "format.all": ["format", "rust.fmt"],
+      "rust.lint": [
+        "cmd cargo clippy --manifest-path=native/flier_inotify/Cargo.toml -- -Dwarnings"
+      ],
+      "rust.fmt": ["cmd cargo fmt --manifest-path=native/flier_inotify/Cargo.toml --all"]
+    ]
+  end
+end
