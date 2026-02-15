@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
 
-members = ["native/flier_inotify"]
+members = ["native/flier_inotify", "native/flier_entries"]

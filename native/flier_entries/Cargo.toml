@@ -1,5 +1,5 @@
 [package]
-name = "flier_readdir"
+name = "flier_entries"
 version = "0.1.0"
 authors = []
 edition = "2021"

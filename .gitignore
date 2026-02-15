@@ -23,4 +23,7 @@ flier-*.tar
 /tmp/
 
 # Rust binary artifacts
+/priv/native/
+
+# Rust binary artifacts
 /target/
