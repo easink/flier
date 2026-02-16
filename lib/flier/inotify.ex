@@ -16,6 +16,7 @@ defmodule Flier.Inotify do
     :isdir
   ]
 
+  @spec start_watcher(path :: String.t(), [atom()], pid()) :: {:ok, reference()} | {:error, term}
   def start_watcher(path, mask, pid \\ self())
 
   def start_watcher(path, :all, pid), do: Flier.Inotify.Native.start_watcher(path, @all, pid)
@@ -23,8 +24,10 @@ defmodule Flier.Inotify do
   def start_watcher(path, mask, pid),
     do: Flier.Inotify.Native.start_watcher(path, mask, pid)
 
+  @spec stop_watcher(reference()) :: :stopped
   def stop_watcher(ref), do: Flier.Inotify.Native.stop_watcher(ref)
 
+  @spec stream(path :: String.t(), [atom()]) :: Enumerable.t()
   def stream(path, mask \\ @all) do
     Stream.resource(
       fn ->

@@ -7,7 +7,7 @@ defmodule Flier.MixProject do
     [
       app: :flier,
       name: "Flier",
-      version: "0.1.0",
+      version: "0.1.1",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -30,6 +30,8 @@ defmodule Flier.MixProject do
     [
       {:rustler, "~> 0.37.1", optional: true, runtime: false},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
       # {:rustler_precompiled, "~> 0.7"},
       {:tidewave, "~> 0.5", only: :dev},

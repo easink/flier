@@ -1,7 +1,7 @@
 defmodule Flier.Entries do
   @moduledoc false
 
-  @spec stream(path :: String.t()) :: Enumerable
+  @spec stream(path :: String.t()) :: Enumerable.t()
   def stream(path) do
     Stream.resource(
       fn ->
