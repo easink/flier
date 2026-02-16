@@ -33,7 +33,7 @@ impl Resource for DirResource {}
 #[module = "Flier.Entries.Entry"]
 struct Entry {
     name: String,
-    type_: Atom,
+    r#type: Atom,
 }
 
 /// Result type for opendir - either success with resource or error with reason
@@ -116,7 +116,10 @@ fn dir_entry_to_struct(entry: &DirEntry) -> Entry {
         _ => other(),
     };
 
-    Entry { name, type_ }
+    Entry {
+        name,
+        r#type: type_,
+    }
 }
 
 /// Convert std::io::Error to an atom

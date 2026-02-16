@@ -58,8 +58,8 @@ defmodule Flier.EntriesTest do
       file_entry = Enum.find(entries, &(&1.name == "regular_file.txt"))
       dir_entry = Enum.find(entries, &(&1.name == "directory"))
 
-      assert file_entry.type_ == :file
-      assert dir_entry.type_ == :directory
+      assert file_entry.type == :file
+      assert dir_entry.type == :directory
     end
 
     test "returns {:error, :end_of_directory} when exhausted", %{tmp_dir: tmp_dir} do
@@ -158,7 +158,7 @@ defmodule Flier.EntriesTest do
 
       assert %Flier.Entries.Entry{} = entry
       assert Map.has_key?(entry, :name)
-      assert Map.has_key?(entry, :type_)
+      assert Map.has_key?(entry, :type)
     end
   end
 
