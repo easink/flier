@@ -14,7 +14,8 @@ defmodule Flier.MixProject do
       aliases: aliases(),
       description: description(),
       package: package(),
-      source_url: @url
+      source_url: @url,
+      docs: docs()
     ]
   end
 
@@ -36,6 +37,17 @@ defmodule Flier.MixProject do
       # {:rustler_precompiled, "~> 0.7"},
       {:tidewave, "~> 0.5", only: :dev},
       {:bandit, "~> 1.0", only: :dev}
+    ]
+  end
+
+  defp docs do
+    [
+      main: "Flier",
+      extras: ["README.md"],
+      groups_for_modules: [
+        "File watching": [Flier.Inotify],
+        "Directory listing": [Flier.Entries, Flier.Entries.Entry]
+      ]
     ]
   end
 

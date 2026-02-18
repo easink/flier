@@ -7,28 +7,27 @@ Add some file functions in Elixir by adding some NIFs using Rustler.
 
 ## Examples (inotify)
 
-~~~elixir
+``` elixir
 {:ok, ref} = Flier.Inotify.start_watcher("/tmp", [:create])
 receive do
     {:inotify_event, file, masks} -> IO.puts("File '#{file}' triggered by #{inspect mask})
 end
 :stopped = Flier.Inotify.stop_watcher(ref)
-~~~~
+```
 
-~~~elixir
+``` elixir
 "/tmp"
 |> Flier.Inotify.stream([:close_write])
 |> Enum.each(fn {file, mask} -> IO.puts("File '#{file}' triggered by #{inspect mask})
-~~~~
+```
 
 ## Examples (entries)
 
-~~~elixir
+``` elixir
 "/tmp"
 |> Flier.Entries.stream()
 |> Enum.each(fn entry -> IO.puts("Entry '#{entry.name}' is a '#{entry.type}'")
-~~~~
-
+```
 
 ## Installation
 
