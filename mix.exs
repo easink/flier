@@ -59,7 +59,7 @@ defmodule Flier.MixProject do
     [
       name: "flier",
       # These are the default files included in the package
-      files: ~w(lib .formatter.exs mix.exs README* LICENSE*),
+      files: ~w(lib native .formatter.exs mix.exs README* LICENSE*),
       licenses: ["MIT"],
       links: %{"GitHub" => @url}
     ]
