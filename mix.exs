@@ -1,13 +1,13 @@
 defmodule Flier.MixProject do
   use Mix.Project
 
-  @url "https://github.com/easink/flier.git"
+  @url "https://codeberg.org/easink/flier.git"
 
   def project do
     [
       app: :flier,
       name: "Flier",
-      version: "0.1.2",
+      version: "0.2.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -61,7 +61,7 @@ defmodule Flier.MixProject do
       # These are the default files included in the package
       files: ~w(lib native .formatter.exs mix.exs README* LICENSE*),
       licenses: ["MIT"],
-      links: %{"GitHub" => @url}
+      links: %{"Codeberg" => @url}
     ]
   end
 

@@ -1,6 +1,6 @@
 defmodule Flier.Entries.Entry do
   @moduledoc """
-  Represents a single entry returned by `Flier.Entries.stream/1`.
+  Represents a single entry returned by `Flier.Entries.stream/2`.
 
   ## Fields
 
@@ -10,7 +10,15 @@ defmodule Flier.Entries.Entry do
     - `:directory` — A directory.
     - `:symlink` — A symbolic link.
     - `:other` — Any other file-system object (device node, socket, FIFO, etc.).
+  - `:path` — The relative path from the walk root to the **directory containing**
+    this entry. Always `"."` in flat (non-recursive) mode. In recursive mode, `"."`
+    for root-level entries and `"subdir/nested"` for deeper entries.
+
+    To build the full absolute path:
+
+        Path.expand(Path.join([root, entry.path, entry.name]))
+
   """
 
-  defstruct [:name, :type]
+  defstruct [:name, :type, path: "."]
 end

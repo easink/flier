@@ -28,12 +28,13 @@ struct DirResource {
 #[rustler::resource_impl]
 impl Resource for DirResource {}
 
-/// A directory entry with name and type
+/// A directory entry with name, type, and relative path from the walk root
 #[derive(rustler::NifStruct)]
 #[module = "Flier.Entries.Entry"]
 struct Entry {
     name: String,
     r#type: Atom,
+    path: String,
 }
 
 /// Result type for opendir - either success with resource or error with reason
@@ -119,6 +120,7 @@ fn dir_entry_to_struct(entry: &DirEntry) -> Entry {
     Entry {
         name,
         r#type: type_,
+        path: ".".to_string(),
     }
 }
 

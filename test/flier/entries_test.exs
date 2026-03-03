@@ -159,6 +159,159 @@ defmodule Flier.EntriesTest do
       assert %Flier.Entries.Entry{} = entry
       assert Map.has_key?(entry, :name)
       assert Map.has_key?(entry, :type)
+      assert Map.has_key?(entry, :path)
+    end
+
+    test "flat stream entries have path: \".\"", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "test.txt"), "content")
+
+      [entry] = Flier.Entries.stream(tmp_dir) |> Enum.to_list()
+
+      assert entry.path == "."
+    end
+  end
+
+  describe "Flier.Entries.stream/2 (recursive)" do
+    test "visits all nested entries", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "root.txt"), "content")
+      File.mkdir!(Path.join(tmp_dir, "subdir"))
+      File.write!(Path.join(tmp_dir, "subdir/nested.txt"), "content")
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.to_list()
+      names = Enum.map(entries, & &1.name) |> Enum.sort()
+
+      assert names == ["nested.txt", "root.txt", "subdir"]
+    end
+
+    test "root-level entries have path: \".\"", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "root.txt"), "content")
+      File.mkdir!(Path.join(tmp_dir, "subdir"))
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.to_list()
+
+      root_entries = Enum.filter(entries, &(&1.name in ["root.txt", "subdir"]))
+      assert Enum.all?(root_entries, &(&1.path == "."))
+    end
+
+    test "nested entries have correct :path", %{tmp_dir: tmp_dir} do
+      File.mkdir_p!(Path.join(tmp_dir, "a/b"))
+      File.write!(Path.join(tmp_dir, "a/b/deep.txt"), "content")
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.to_list()
+
+      deep = Enum.find(entries, &(&1.name == "deep.txt"))
+      assert deep.path == "a/b"
+    end
+
+    test "path + name yields correct full path", %{tmp_dir: tmp_dir} do
+      File.mkdir_p!(Path.join(tmp_dir, "sub"))
+      File.write!(Path.join(tmp_dir, "sub/file.txt"), "content")
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.to_list()
+
+      file = Enum.find(entries, &(&1.name == "file.txt"))
+      full = Path.expand(Path.join([tmp_dir, file.path, file.name]))
+      assert full == Path.join(tmp_dir, "sub/file.txt")
+    end
+
+    test "max_depth: 0 returns only root-level entries", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "root.txt"), "content")
+      File.mkdir!(Path.join(tmp_dir, "subdir"))
+      File.write!(Path.join(tmp_dir, "subdir/nested.txt"), "content")
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true, max_depth: 0) |> Enum.to_list()
+      names = Enum.map(entries, & &1.name) |> Enum.sort()
+
+      assert names == ["root.txt", "subdir"]
+    end
+
+    test "max_depth: 1 includes one subdir level", %{tmp_dir: tmp_dir} do
+      File.mkdir_p!(Path.join(tmp_dir, "a/b"))
+      File.write!(Path.join(tmp_dir, "root.txt"), "content")
+      File.write!(Path.join(tmp_dir, "a/level1.txt"), "content")
+      File.write!(Path.join(tmp_dir, "a/b/level2.txt"), "content")
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true, max_depth: 1) |> Enum.to_list()
+      names = Enum.map(entries, & &1.name) |> Enum.sort()
+
+      assert "root.txt" in names
+      assert "level1.txt" in names
+      refute "level2.txt" in names
+    end
+
+    test "does not follow symlinks by default", %{tmp_dir: tmp_dir} do
+      # Put the target file in an external dir — only reachable via the symlink
+      external = Path.join(System.tmp_dir!(), "flier_ext_#{:rand.uniform(1_000_000)}")
+      File.mkdir_p!(external)
+      File.write!(Path.join(external, "external.txt"), "content")
+      File.ln_s!(external, Path.join(tmp_dir, "link_dir"))
+
+      on_exit(fn -> File.rm_rf!(external) end)
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.to_list()
+      names = Enum.map(entries, & &1.name)
+
+      # The symlink entry itself is yielded
+      assert "link_dir" in names
+      # But its contents are not visited
+      refute "external.txt" in names
+    end
+
+    test "follows symlinks when follow_symlinks: true", %{tmp_dir: tmp_dir} do
+      # Same setup: target only reachable via symlink
+      external = Path.join(System.tmp_dir!(), "flier_ext_#{:rand.uniform(1_000_000)}")
+      File.mkdir_p!(external)
+      File.write!(Path.join(external, "external.txt"), "content")
+      File.ln_s!(external, Path.join(tmp_dir, "link_dir"))
+
+      on_exit(fn -> File.rm_rf!(external) end)
+
+      entries =
+        Flier.Entries.stream(tmp_dir, recursive: true, follow_symlinks: true) |> Enum.to_list()
+
+      names = Enum.map(entries, & &1.name)
+      assert "external.txt" in names
+    end
+
+    test "on_error: :skip silently skips unreadable subdirs", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "root.txt"), "content")
+      File.mkdir!(Path.join(tmp_dir, "subdir"))
+      File.write!(Path.join(tmp_dir, "subdir/nested.txt"), "content")
+      File.mkdir!(Path.join(tmp_dir, "no_access"))
+      File.chmod!(Path.join(tmp_dir, "no_access"), 0o000)
+
+      entries =
+        Flier.Entries.stream(tmp_dir, recursive: true, on_error: :skip) |> Enum.to_list()
+
+      names = Enum.map(entries, & &1.name)
+
+      assert "root.txt" in names
+      assert "nested.txt" in names
+      assert "no_access" in names
+
+      File.chmod!(Path.join(tmp_dir, "no_access"), 0o755)
+    end
+
+    test "on_error: :raise raises on unreadable subdir", %{tmp_dir: tmp_dir} do
+      File.mkdir!(Path.join(tmp_dir, "no_access"))
+      File.chmod!(Path.join(tmp_dir, "no_access"), 0o000)
+
+      assert_raise RuntimeError, ~r/cannot open directory/, fn ->
+        Flier.Entries.stream(tmp_dir, recursive: true, on_error: :raise) |> Enum.to_list()
+      end
+
+      File.chmod!(Path.join(tmp_dir, "no_access"), 0o755)
+    end
+
+    test "empty directory returns empty list", %{tmp_dir: tmp_dir} do
+      assert [] == Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.to_list()
+    end
+
+    test "stream can be halted early and cleans up", %{tmp_dir: tmp_dir} do
+      for i <- 1..10, do: File.write!(Path.join(tmp_dir, "file#{i}.txt"), "content")
+
+      entries = Flier.Entries.stream(tmp_dir, recursive: true) |> Enum.take(3)
+      assert length(entries) == 3
     end
   end
 
