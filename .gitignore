@@ -27,3 +27,6 @@ flier-*.tar
 
 # Rust binary artifacts
 /target/
+
+# RustlerPrecompiled checksum files (included in Hex package, not in git)
+checksum-*.exs

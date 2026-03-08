@@ -1,0 +1,121 @@
+name: Build precompiled NIFs
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  create_release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes || true
+
+  build_release:
+    name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }}
+    needs: create_release
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        nif: ["2.16"]
+        job:
+          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
+          - target: arm-unknown-linux-gnueabihf
+          - target: riscv64gc-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.job.target }}
+
+      - name: Install cross-compilation tools
+        run: |
+          case "${{ matrix.job.target }}" in
+            x86_64-unknown-linux-musl)
+              sudo apt-get update -qq && sudo apt-get install -y musl-tools
+              ;;
+            aarch64-unknown-linux-gnu)
+              sudo apt-get update -qq && sudo apt-get install -y gcc-aarch64-linux-gnu
+              ;;
+            aarch64-unknown-linux-musl)
+              sudo apt-get update -qq && sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+              ;;
+            arm-unknown-linux-gnueabihf)
+              sudo apt-get update -qq && sudo apt-get install -y gcc-arm-linux-gnueabihf
+              ;;
+            riscv64gc-unknown-linux-gnu)
+              sudo apt-get update -qq && sudo apt-get install -y gcc-riscv64-linux-gnu
+              ;;
+          esac
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.job.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.job.target }}-
+
+      - name: Build NIFs
+        run: |
+          NIF_FEATURE="nif_version_$(echo "${{ matrix.nif }}" | tr '.' '_')"
+          for CRATE in flier_inotify flier_entries; do
+            cargo build --release \
+              --target ${{ matrix.job.target }} \
+              --manifest-path native/${CRATE}/Cargo.toml \
+              --features "${NIF_FEATURE}"
+          done
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+
+      - name: Package artifacts
+        env:
+          TARGET: ${{ matrix.job.target }}
+          VERSION: ${{ steps.version.outputs.version }}
+          NIF_VERSION: ${{ matrix.nif }}
+        run: |
+          for CRATE in flier_inotify flier_entries; do
+            SO="target/${TARGET}/release/lib${CRATE}.so"
+            ARCHIVE="${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.tar.gz"
+            tar -czf "${ARCHIVE}" -C "$(dirname ${SO})" "lib${CRATE}.so"
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256sum"
+          done
+
+      - name: Upload artifacts to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          NIF_VERSION: ${{ matrix.nif }}
+          TARGET: ${{ matrix.job.target }}
+        run: |
+          for CRATE in flier_inotify flier_entries; do
+            FILE="${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.tar.gz"
+            gh release upload "${GITHUB_REF_NAME}" "${FILE}" --clobber
+          done

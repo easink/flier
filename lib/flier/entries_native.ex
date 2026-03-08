@@ -1,9 +1,23 @@
 defmodule Flier.Entries.Native do
   @moduledoc false
 
-  use Rustler,
+  version = Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
     otp_app: :flier,
-    crate: :flier_entries
+    crate: :flier_entries,
+    base_url: "https://github.com/easink/flier/releases/download/v#{version}",
+    force_build: System.get_env("FLIER_BUILD") in ["1", "true"],
+    version: version,
+    targets: ~w(
+      x86_64-unknown-linux-gnu
+      x86_64-unknown-linux-musl
+      aarch64-unknown-linux-gnu
+      aarch64-unknown-linux-musl
+      arm-unknown-linux-gnueabihf
+      riscv64gc-unknown-linux-gnu
+    ),
+    nif_versions: ["2.16"]
 
   def opendir(_path), do: :erlang.nif_error(:nif_not_loaded)
   def readdir(_ref), do: :erlang.nif_error(:nif_not_loaded)
