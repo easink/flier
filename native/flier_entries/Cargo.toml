@@ -7,5 +7,10 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+nif_version_2_15 = ["rustler/nif_version_2_15"]
+nif_version_2_16 = ["rustler/nif_version_2_16"]
+nif_version_2_17 = ["rustler/nif_version_2_17"]
+
 [dependencies]
 rustler = "0.37.0"
