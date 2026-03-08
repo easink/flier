@@ -30,11 +30,17 @@ jobs:
         nif: ["2.16"]
         job:
           - target: x86_64-unknown-linux-gnu
+            use_cross: false
           - target: x86_64-unknown-linux-musl
+            use_cross: true
           - target: aarch64-unknown-linux-gnu
+            use_cross: true
           - target: aarch64-unknown-linux-musl
+            use_cross: true
           - target: arm-unknown-linux-gnueabihf
+            use_cross: true
           - target: riscv64gc-unknown-linux-gnu
+            use_cross: true
 
     steps:
       - uses: actions/checkout@v4
@@ -51,25 +57,9 @@ jobs:
         with:
           targets: ${{ matrix.job.target }}
 
-      - name: Install cross-compilation tools
-        run: |
-          case "${{ matrix.job.target }}" in
-            x86_64-unknown-linux-musl)
-              sudo apt-get update -qq && sudo apt-get install -y musl-tools
-              ;;
-            aarch64-unknown-linux-gnu)
-              sudo apt-get update -qq && sudo apt-get install -y gcc-aarch64-linux-gnu
-              ;;
-            aarch64-unknown-linux-musl)
-              sudo apt-get update -qq && sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
-              ;;
-            arm-unknown-linux-gnueabihf)
-              sudo apt-get update -qq && sudo apt-get install -y gcc-arm-linux-gnueabihf
-              ;;
-            riscv64gc-unknown-linux-gnu)
-              sudo apt-get update -qq && sudo apt-get install -y gcc-riscv64-linux-gnu
-              ;;
-          esac
+      - name: Install cross
+        if: ${{ matrix.job.use_cross }}
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -83,17 +73,13 @@ jobs:
       - name: Build NIFs
         run: |
           NIF_FEATURE="nif_version_$(echo "${{ matrix.nif }}" | tr '.' '_')"
+          BUILD_CMD="${{ matrix.job.use_cross == true && 'cross' || 'cargo' }}"
           for CRATE in flier_inotify flier_entries; do
-            cargo build --release \
+            $BUILD_CMD build --release \
               --target ${{ matrix.job.target }} \
               --manifest-path native/${CRATE}/Cargo.toml \
               --features "${NIF_FEATURE}"
           done
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
-          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
 
       - name: Package artifacts
         env:
