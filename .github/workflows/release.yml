@@ -85,8 +85,11 @@ jobs:
         run: |
           for CRATE in flier_inotify flier_entries; do
             SO="target/${TARGET}/release/lib${CRATE}.so"
-            ARCHIVE="lib${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so.tar.gz"
-            tar -czf "${ARCHIVE}" -C "$(dirname ${SO})" "lib${CRATE}.so"
+            LIB_NAME="lib${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so"
+            ARCHIVE="${LIB_NAME}.tar.gz"
+            cp "${SO}" "${LIB_NAME}"
+            tar -czf "${ARCHIVE}" "${LIB_NAME}"
+            rm "${LIB_NAME}"
             sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256sum"
           done
 
