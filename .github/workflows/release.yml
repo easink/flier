@@ -85,7 +85,7 @@ jobs:
         run: |
           for CRATE in flier_inotify flier_entries; do
             SO="target/${TARGET}/release/lib${CRATE}.so"
-            ARCHIVE="${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.tar.gz"
+            ARCHIVE="lib${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so.tar.gz"
             tar -czf "${ARCHIVE}" -C "$(dirname ${SO})" "lib${CRATE}.so"
             sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256sum"
           done
@@ -98,6 +98,6 @@ jobs:
           TARGET: ${{ matrix.job.target }}
         run: |
           for CRATE in flier_inotify flier_entries; do
-            FILE="${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.tar.gz"
+            FILE="lib${CRATE}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so.tar.gz"
             gh release upload "${GITHUB_REF_NAME}" "${FILE}" --clobber
           done

@@ -1,7 +1,7 @@
 defmodule Flier.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.2.6"
   @url "https://github.com/easink/flier"
 
   def project do
