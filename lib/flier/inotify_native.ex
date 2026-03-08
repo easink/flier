@@ -11,9 +11,7 @@ defmodule Flier.Inotify.Native do
     version: version,
     targets: ~w(
       x86_64-unknown-linux-gnu
-      x86_64-unknown-linux-musl
       aarch64-unknown-linux-gnu
-      aarch64-unknown-linux-musl
       arm-unknown-linux-gnueabihf
       riscv64gc-unknown-linux-gnu
     ),
