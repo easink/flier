@@ -15,7 +15,7 @@ defmodule Flier.Inotify.Native do
       arm-unknown-linux-gnueabihf
       riscv64gc-unknown-linux-gnu
     ),
-    nif_versions: ["2.16"]
+    nif_versions: ["2.16", "2.17"]
 
   def start_watcher(_path, _mask, _pid), do: :erlang.nif_error(:nif_not_loaded)
   def stop_watcher(_ref), do: :erlang.nif_error(:nif_not_loaded)

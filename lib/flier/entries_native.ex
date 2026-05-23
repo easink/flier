@@ -15,7 +15,7 @@ defmodule Flier.Entries.Native do
       arm-unknown-linux-gnueabihf
       riscv64gc-unknown-linux-gnu
     ),
-    nif_versions: ["2.16"]
+    nif_versions: ["2.16", "2.17"]
 
   def opendir(_path), do: :erlang.nif_error(:nif_not_loaded)
   def readdir(_ref), do: :erlang.nif_error(:nif_not_loaded)
