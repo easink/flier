@@ -69,7 +69,8 @@ defmodule Flier.MixProject do
     [
       "format.all": ["format", "rust.fmt"],
       "rust.lint": [
-        "cmd cargo clippy --manifest-path=native/flier_inotify/Cargo.toml -- -Dwarnings"
+        "cmd cargo clippy --manifest-path=native/flier_inotify/Cargo.toml -- -Dwarnings",
+        "cmd cargo clippy --manifest-path=native/flier_entries/Cargo.toml -- -Dwarnings"
       ],
       "rust.fmt": [
         "cmd cargo fmt --manifest-path=native/flier_inotify/Cargo.toml --all",
