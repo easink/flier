@@ -5,6 +5,7 @@ use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use rustler::{
     Atom, Encoder, Error, LocalPid, NifResult, OwnedEnv, Resource, ResourceArc, Term,
 };
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsFd;
 
 use std::boxed::Box;
@@ -126,15 +127,27 @@ fn start_watcher<'a>(
                     match inotify.read_events(&mut buffer) {
                         Ok(events) => {
                             for event in events {
-                                let filename = event
+                                // Preserve the raw bytes of the filename. Linux filenames are
+                                // arbitrary byte sequences; a lossy UTF-8 conversion here would
+                                // silently drop information for non-UTF-8 names. The bytes are
+                                // sent as an Erlang binary (via OwnedBinary), which is fully
+                                // compatible with valid-UTF-8 names — Elixir strings are
+                                // binaries — and preserves bytes for non-UTF-8 names. Note that
+                                // a bare `Vec<u8>` would be encoded as a list of small integers
+                                // (a charlist), not a binary.
+                                let filename_bytes: Vec<u8> = event
                                     .name
-                                    .and_then(|os_str| os_str.to_str().map(|s| s.to_string()))
-                                    .unwrap_or_else(|| "".to_string());
+                                    .map(|os_str| os_str.as_bytes().to_vec())
+                                    .unwrap_or_default();
 
                                 let mask_atoms = mask_to_atoms(event.mask);
 
                                 let sent = OwnedEnv::send_and_clear(&mut owned_env, &pid, |env| {
-                                    (inotify_event(), filename, mask_atoms).encode(env)
+                                    let mut bin = rustler::OwnedBinary::new(filename_bytes.len())
+                                        .expect("failed to allocate OwnedBinary for filename");
+                                    bin.as_mut_slice().copy_from_slice(&filename_bytes);
+                                    let filename_term = bin.release(env);
+                                    (inotify_event(), filename_term, mask_atoms).encode(env)
                                 });
                                 if sent.is_err() {
                                     running_clone.store(false, Ordering::SeqCst);

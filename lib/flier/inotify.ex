@@ -34,6 +34,14 @@ defmodule Flier.Inotify do
   Pass the special atom `:all` as the mask to subscribe to all of the above
   events at once.
 
+  > #### Filename encoding {: .info}
+  >
+  > Filenames are delivered as binaries containing the raw bytes from the
+  > kernel. Most filenames are valid UTF-8 and can be used as ordinary
+  > Elixir strings. Filenames that are not valid UTF-8 (legal on Linux) are
+  > still delivered with every byte intact and can be passed to file APIs
+  > unchanged, but may not display correctly with `IO.puts/1` and similar.
+
   ## Examples
 
   ### Message-based usage
