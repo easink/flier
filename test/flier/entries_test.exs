@@ -23,10 +23,10 @@ defmodule Flier.EntriesTest do
       assert {:error, :not_found} = Flier.Entries.Native.opendir(non_existent)
     end
 
-    test "returns error for file path", %{tmp_dir: tmp_dir} do
+    test "returns {:error, :not_a_directory} for file path", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "test_file.txt")
       File.write!(file_path, "content")
-      assert {:error, _reason} = Flier.Entries.Native.opendir(file_path)
+      assert {:error, :not_a_directory} = Flier.Entries.Native.opendir(file_path)
     end
   end
 
