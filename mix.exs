@@ -1,7 +1,7 @@
 defmodule Flier.MixProject do
   use Mix.Project
 
-  @version "0.2.7"
+  @version "0.3.0"
   @url "https://github.com/easink/flier"
 
   def project do
@@ -61,7 +61,7 @@ defmodule Flier.MixProject do
       # These are the default files included in the package
       files: ~w(lib native .formatter.exs mix.exs README* LICENSE* checksum-*.exs),
       licenses: ["MIT"],
-      links: %{"Github" => @url}
+      links: %{"GitHub" => @url}
     ]
   end
 

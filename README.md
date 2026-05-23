@@ -37,7 +37,7 @@ installed by adding `flier` to your list of dependencies in `mix.exs`:
 ``` elixir
 def deps do
   [
-    {:flier, "~> 0.1.0"}
+    {:flier, "~> 0.3.0"}
   ]
 end
 ```
