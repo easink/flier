@@ -3,7 +3,7 @@
 use inotify::{EventMask, Inotify, WatchMask};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use rustler::{
-    Atom, Encoder, Env, Error, LocalPid, Monitor, NifResult, OwnedEnv, Resource, ResourceArc, Term,
+    Atom, Encoder, Error, LocalPid, NifResult, OwnedEnv, Resource, ResourceArc, Term,
 };
 use std::os::unix::io::AsFd;
 
@@ -52,12 +52,19 @@ struct WatcherResource {
     inner: Mutex<WatcherResourceInner>,
 }
 
-// #[rustler::resource_impl(register = true, name = "monitor")]
 #[rustler::resource_impl]
-impl Resource for WatcherResource {
-    fn down<'a>(&'a self, _env: Env<'a>, _pid: LocalPid, _mon: Monitor) {
-        let mut inner = self.inner.lock().unwrap();
-        // Stop thread when GC’d
+impl Resource for WatcherResource {}
+
+impl Drop for WatcherResource {
+    fn drop(&mut self) {
+        // Guarantee the background thread is stopped and joined when the
+        // resource is garbage-collected, even if the caller never invoked
+        // `stop_watcher/1`. Lock may be poisoned if another method panicked;
+        // still proceed with cleanup in that case.
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         inner.running.store(false, Ordering::SeqCst);
         if let Some(watcher) = inner.watcher.take() {
             let _ = watcher.join();

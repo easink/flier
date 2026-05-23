@@ -381,5 +381,30 @@ defmodule Flier.InotifyTest do
       # Empty mask list is not allowed by the NIF
       assert {:error, :failed_to_add_watcher} = Flier.Inotify.start_watcher(tmp_dir, [])
     end
+
+    test "watcher is cleaned up when the resource is garbage-collected", %{tmp_dir: tmp_dir} do
+      # Start a watcher in a child function so the ResourceArc has no
+      # remaining Elixir-side references after the call returns. The Rust
+      # `Drop` impl on WatcherResource must then stop the polling thread.
+      start_and_drop = fn ->
+        {:ok, _ref} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+        :ok
+      end
+
+      :ok = start_and_drop.()
+
+      # Force a couple of GC passes to ensure the resource is reclaimed.
+      :erlang.garbage_collect(self())
+      Process.sleep(50)
+      :erlang.garbage_collect(self())
+
+      # If the thread is still running, creating a file would still produce
+      # an event (the thread sends to the original caller pid, which is this
+      # test process). After GC + Drop, no event should arrive.
+      test_file = Path.join(tmp_dir, "after_gc.txt")
+      File.write!(test_file, "should not trigger event")
+
+      refute_receive {:inotify_event, _, _}, 300
+    end
   end
 end
