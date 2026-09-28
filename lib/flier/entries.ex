@@ -177,11 +177,11 @@ defmodule Flier.Entries do
 
               stack_tail = [{:reading, ref, dir, rel_path, depth} | rest]
 
+              sub_abs = Path.join(dir, entry.name)
+
               new_stack =
                 if (max_depth == :infinity or depth < max_depth) and
-                     (entry.type == :directory or (follow_symlinks and entry.type == :symlink)) do
-                  sub_abs = Path.join(dir, entry.name)
-
+                     descend?(entry.type, sub_abs, follow_symlinks) do
                   sub_rel =
                     if rel_path == ".", do: entry.name, else: Path.join(rel_path, entry.name)
 
@@ -203,4 +203,10 @@ defmodule Flier.Entries do
       end
     )
   end
+
+  # Only descend into real directories, or symlinks whose target is a
+  # directory (broken links and links to files are yielded but not followed).
+  defp descend?(:directory, _path, _follow_symlinks), do: true
+  defp descend?(:symlink, path, true), do: File.dir?(path)
+  defp descend?(_type, _path, _follow_symlinks), do: false
 end

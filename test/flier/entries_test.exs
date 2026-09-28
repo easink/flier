@@ -369,20 +369,39 @@ defmodule Flier.EntriesTest do
       assert "real.txt" in names
     end
 
-    test "broken symlinks raise under :raise + follow_symlinks: true", %{tmp_dir: tmp_dir} do
+    test "broken symlinks are yielded but not descended into under :raise + follow_symlinks",
+         %{tmp_dir: tmp_dir} do
       File.ln_s!(
         "/nonexistent_target_#{System.unique_integer([:positive])}",
         Path.join(tmp_dir, "broken")
       )
 
-      assert_raise RuntimeError, ~r/cannot open directory/, fn ->
+      names =
         Flier.Entries.stream(tmp_dir,
           recursive: true,
           follow_symlinks: true,
           on_error: :raise
         )
-        |> Enum.to_list()
-      end
+        |> Enum.map(& &1.name)
+
+      assert names == ["broken"]
+    end
+
+    test "symlinks to files are not descended into under :raise + follow_symlinks",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "real.txt"), "x")
+      File.ln_s!(Path.join(tmp_dir, "real.txt"), Path.join(tmp_dir, "link.txt"))
+
+      names =
+        Flier.Entries.stream(tmp_dir,
+          recursive: true,
+          follow_symlinks: true,
+          on_error: :raise
+        )
+        |> Enum.map(& &1.name)
+        |> Enum.sort()
+
+      assert names == ["link.txt", "real.txt"]
     end
 
     test "symlink cycle terminates with max_depth guard", %{tmp_dir: tmp_dir} do
