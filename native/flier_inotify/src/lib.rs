@@ -176,79 +176,51 @@ fn stop_watcher(resource: ResourceArc<WatcherResource>) -> Atom {
 
 rustler::init!("Elixir.Flier.Inotify.Native");
 
+type AtomFn = fn() -> Atom;
+
+/// Subscribable events: Elixir atom, inotify watch flag, and event flag.
+const EVENTS: [(AtomFn, WatchMask, EventMask); 10] = [
+    (create, WatchMask::CREATE, EventMask::CREATE),
+    (modify, WatchMask::MODIFY, EventMask::MODIFY),
+    (delete, WatchMask::DELETE, EventMask::DELETE),
+    (moved_from, WatchMask::MOVED_FROM, EventMask::MOVED_FROM),
+    (moved_to, WatchMask::MOVED_TO, EventMask::MOVED_TO),
+    (access, WatchMask::ACCESS, EventMask::ACCESS),
+    (attrib, WatchMask::ATTRIB, EventMask::ATTRIB),
+    (close_write, WatchMask::CLOSE_WRITE, EventMask::CLOSE_WRITE),
+    (
+        close_nowrite,
+        WatchMask::CLOSE_NOWRITE,
+        EventMask::CLOSE_NOWRITE,
+    ),
+    (open, WatchMask::OPEN, EventMask::OPEN),
+];
+
+/// Flags the kernel reports without being subscribed to.
+const REPORT_ONLY: [(AtomFn, EventMask); 2] =
+    [(ignored, EventMask::IGNORED), (isdir, EventMask::ISDIR)];
+
+/// Build the watch mask; unknown atoms are ignored (validated in Elixir).
 fn build_watch_mask(event_atoms: &[Atom]) -> WatchMask {
-    let mut mask = WatchMask::empty();
-
-    for atom in event_atoms {
-        if *atom == create() {
-            mask |= WatchMask::CREATE;
-        } else if *atom == modify() {
-            mask |= WatchMask::MODIFY;
-        } else if *atom == delete() {
-            mask |= WatchMask::DELETE;
-        } else if *atom == moved_from() {
-            mask |= WatchMask::MOVED_FROM;
-        } else if *atom == moved_to() {
-            mask |= WatchMask::MOVED_TO;
-        } else if *atom == access() {
-            mask |= WatchMask::ACCESS;
-        } else if *atom == attrib() {
-            mask |= WatchMask::ATTRIB;
-        } else if *atom == close_write() {
-            mask |= WatchMask::CLOSE_WRITE;
-        } else if *atom == close_nowrite() {
-            mask |= WatchMask::CLOSE_NOWRITE;
-        } else if *atom == open() {
-            mask |= WatchMask::OPEN;
-        }
-    }
-
-    mask
+    EVENTS
+        .iter()
+        .filter(|(atom, _, _)| event_atoms.contains(&atom()))
+        .fold(WatchMask::empty(), |mask, (_, flag, _)| mask | *flag)
 }
 
 fn mask_to_atoms(mask: EventMask) -> Vec<Atom> {
-    let mut atoms = Vec::new();
+    let events = EVENTS.iter().map(|(atom, _, flag)| (atom, flag));
+    let report_only = REPORT_ONLY.iter().map(|(atom, flag)| (atom, flag));
 
-    if mask.contains(EventMask::CREATE) {
-        atoms.push(create());
-    }
-    if mask.contains(EventMask::MODIFY) {
-        atoms.push(modify());
-    }
-    if mask.contains(EventMask::DELETE) {
-        atoms.push(delete());
-    }
-    if mask.contains(EventMask::MOVED_FROM) {
-        atoms.push(moved_from());
-    }
-    if mask.contains(EventMask::MOVED_TO) {
-        atoms.push(moved_to());
-    }
-    if mask.contains(EventMask::ACCESS) {
-        atoms.push(access());
-    }
-    if mask.contains(EventMask::ATTRIB) {
-        atoms.push(attrib());
-    }
-    if mask.contains(EventMask::CLOSE_WRITE) {
-        atoms.push(close_write());
-    }
-    if mask.contains(EventMask::CLOSE_NOWRITE) {
-        atoms.push(close_nowrite());
-    }
-    if mask.contains(EventMask::OPEN) {
-        atoms.push(open());
-    }
-    if mask.contains(EventMask::IGNORED) {
-        atoms.push(ignored());
-    }
-    if mask.contains(EventMask::ISDIR) {
-        atoms.push(isdir());
-    }
+    let atoms: Vec<Atom> = events
+        .chain(report_only)
+        .filter(|(_, flag)| mask.contains(**flag))
+        .map(|(atom, _)| atom())
+        .collect();
 
     if atoms.is_empty() {
-        atoms.push(unknown());
+        vec![unknown()]
+    } else {
+        atoms
     }
-
-    atoms
 }

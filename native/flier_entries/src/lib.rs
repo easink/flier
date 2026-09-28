@@ -1,12 +1,10 @@
-use rustler::{Atom, Binary, Encoder, Env, NifResult, OwnedBinary, Resource, ResourceArc};
+use rustler::{Atom, Binary, Env, OwnedBinary, Resource, ResourceArc};
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, ReadDir};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Mutex;
 
 rustler::atoms! {
-    ok,
-    error,
     closed,
     // Entry types
     file,
@@ -40,65 +38,29 @@ struct Entry<'a> {
     path: String,
 }
 
-/// Result type for opendir - either success with resource or error with reason
-enum OpendirResult {
-    Ok(ResourceArc<DirResource>),
-    Error(Atom),
-}
-
-impl Encoder for OpendirResult {
-    fn encode<'a>(&self, env: Env<'a>) -> rustler::Term<'a> {
-        match self {
-            OpendirResult::Ok(resource) => (ok(), resource).encode(env),
-            OpendirResult::Error(reason) => (error(), *reason).encode(env),
-        }
-    }
-}
-
 /// Open a directory for reading. The path is taken as raw bytes so that
-/// non-UTF-8 paths work.
+/// non-UTF-8 paths work. Returns `{:ok, ref}` or `{:error, reason}`.
 #[rustler::nif(schedule = "DirtyIo")]
-fn opendir(path: Binary) -> OpendirResult {
-    match fs::read_dir(OsStr::from_bytes(path.as_slice())) {
-        Ok(read_dir) => {
-            let resource = ResourceArc::new(DirResource {
-                inner: Mutex::new(Some(read_dir)),
-            });
-            OpendirResult::Ok(resource)
-        }
-        Err(err) => {
-            let reason = io_error_to_atom(&err);
-            OpendirResult::Error(reason)
-        }
-    }
+fn opendir(path: Binary) -> Result<ResourceArc<DirResource>, Atom> {
+    let read_dir =
+        fs::read_dir(OsStr::from_bytes(path.as_slice())).map_err(|e| io_error_to_atom(&e))?;
+
+    Ok(ResourceArc::new(DirResource {
+        inner: Mutex::new(Some(read_dir)),
+    }))
 }
 
-/// Read the next entry from the directory
+/// Read the next entry from the directory. Returns `{:ok, entry}` or
+/// `{:error, reason}`, with reason `:end_of_directory` when exhausted.
 #[rustler::nif(schedule = "DirtyIo")]
-fn readdir(env: Env, resource: ResourceArc<DirResource>) -> NifResult<rustler::Term> {
+fn readdir(env: Env, resource: ResourceArc<DirResource>) -> Result<Entry, Atom> {
     let mut guard = resource.inner.lock().unwrap();
+    let read_dir = guard.as_mut().ok_or_else(already_closed)?;
 
-    match guard.as_mut() {
-        None => {
-            // Directory was already closed
-            Ok((error(), already_closed()).encode(env))
-        }
-        Some(read_dir) => {
-            match read_dir.next() {
-                Some(Ok(entry)) => {
-                    let entry_struct = dir_entry_to_struct(env, &entry);
-                    Ok((ok(), entry_struct).encode(env))
-                }
-                Some(Err(err)) => {
-                    let reason = io_error_to_atom(&err);
-                    Ok((error(), reason).encode(env))
-                }
-                None => {
-                    // End of directory
-                    Ok((error(), end_of_directory()).encode(env))
-                }
-            }
-        }
+    match read_dir.next() {
+        Some(Ok(entry)) => Ok(dir_entry_to_struct(env, &entry)),
+        Some(Err(err)) => Err(io_error_to_atom(&err)),
+        None => Err(end_of_directory()),
     }
 }
 
