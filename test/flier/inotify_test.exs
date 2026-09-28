@@ -42,6 +42,24 @@ defmodule Flier.InotifyTest do
       assert :stopped = Flier.Inotify.stop_watcher(ref)
     end
 
+    test "returns promptly without waiting for a poll interval", %{tmp_dir: tmp_dir} do
+      {:ok, ref} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      # Let the watcher thread settle into its blocking read.
+      Process.sleep(20)
+
+      {micros, :stopped} = :timer.tc(fn -> Flier.Inotify.stop_watcher(ref) end)
+      assert micros < 20_000, "stop_watcher took #{micros}µs"
+    end
+
+    test "returns promptly after the watched directory was removed", %{tmp_dir: tmp_dir} do
+      {:ok, ref} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      File.rm_rf!(tmp_dir)
+      Process.sleep(50)
+
+      {micros, :stopped} = :timer.tc(fn -> Flier.Inotify.stop_watcher(ref) end)
+      assert micros < 20_000, "stop_watcher took #{micros}µs"
+    end
+
     test "can start and stop watcher multiple times", %{tmp_dir: tmp_dir} do
       for _ <- 1..3 do
         {:ok, ref} = Flier.Inotify.start_watcher(tmp_dir, :all)

@@ -15,4 +15,3 @@ nif_version_2_17 = ["rustler/nif_version_2_17"]
 [dependencies]
 rustler = "0.37.0"
 inotify = "0.11"
-nix = { version = "0.29", features = ["poll"] }

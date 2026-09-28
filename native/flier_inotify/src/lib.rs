@@ -1,28 +1,15 @@
-// extern crate inotify;
-
-use inotify::{EventMask, Inotify, WatchMask};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use rustler::{
-    Atom, Encoder, Error, LocalPid, NifResult, OwnedEnv, Resource, ResourceArc, Term,
-};
+use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
+use rustler::{Atom, Encoder, Error, LocalPid, NifResult, OwnedEnv, Resource, ResourceArc};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::AsFd;
-
-use std::boxed::Box;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-
 use std::thread;
 
 rustler::atoms! {
     ok,
-    error,
-    // none,
     stopped,
     init_failed,
     failed_to_add_watcher,
-    inotify_error,
     no_pid,
     // event type
     inotify_event,
@@ -42,11 +29,31 @@ rustler::atoms! {
     unknown
 }
 
-/// A resource that holds the thread stop flag and join handle
-// #[derive(Resource)]
+/// Handle to the background reader thread.
+///
+/// The thread blocks in `read(2)` on the inotify fd. To stop it we set
+/// `running` to false and remove the watch: the kernel then queues an
+/// `IN_IGNORED` event, which wakes the thread immediately so it can observe
+/// the flag and exit. This keeps `stop_watcher/1` (and `Drop`) fast instead
+/// of waiting for a poll timeout.
 struct WatcherResourceInner {
     running: Arc<AtomicBool>,
-    watcher: Option<thread::JoinHandle<()>>, // down_called: bool,
+    watches: Watches,
+    wd: WatchDescriptor,
+    watcher: Option<thread::JoinHandle<()>>,
+}
+
+impl WatcherResourceInner {
+    fn stop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(watcher) = self.watcher.take() {
+            // Fails with EINVAL if the watch is already gone (e.g. the watched
+            // directory was deleted); the thread has then exited on its own
+            // after receiving IN_IGNORED.
+            let _ = self.watches.remove(self.wd.clone());
+            let _ = watcher.join();
+        }
+    }
 }
 
 struct WatcherResource {
@@ -60,140 +67,82 @@ impl Drop for WatcherResource {
     fn drop(&mut self) {
         // Guarantee the background thread is stopped and joined when the
         // resource is garbage-collected, even if the caller never invoked
-        // `stop_watcher/1`. Lock may be poisoned if another method panicked;
-        // still proceed with cleanup in that case.
+        // `stop_watcher/1`. Proceed even if the lock is poisoned.
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        inner.running.store(false, Ordering::SeqCst);
-        if let Some(watcher) = inner.watcher.take() {
-            let _ = watcher.join();
-        }
+        inner.stop();
     }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn start_watcher<'a>(
+fn start_watcher(
     path: String,
     event_list: Vec<Atom>,
-    pid_term: Term<'a>,
+    pid: rustler::Term,
 ) -> NifResult<(Atom, ResourceArc<WatcherResource>)> {
-    let (tx, rx) = mpsc::channel();
-
-    let pid = pid_term
+    let pid = pid
         .decode::<LocalPid>()
         .map_err(|_| Error::Term(Box::new(no_pid())))?;
 
-    let mask = build_watch_mask(&event_list);
+    let inotify = Inotify::init().map_err(|_| Error::Term(Box::new(init_failed())))?;
+    let mut watches = inotify.watches();
+    let wd = watches
+        .add(&path, build_watch_mask(&event_list))
+        .map_err(|_| Error::Term(Box::new(failed_to_add_watcher())))?;
 
-    // Shared flag to stop the thread if the process dies
     let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
+    let thread_running = running.clone();
+    let watcher = thread::spawn(move || read_loop(inotify, pid, thread_running));
 
-    let watcher = thread::spawn(move || {
-        let mut owned_env = OwnedEnv::new();
-        let mut inotify = match Inotify::init() {
-            Ok(i) => i,
-            Err(_err) => {
-                let _ = tx.send(Err(init_failed()));
-
-                return;
-            }
-        };
-
-        if let Err(_err) = inotify.watches().add(&path, mask) {
-            let _ = tx.send(Err(failed_to_add_watcher()));
-            return;
-        }
-        let _ = tx.send(Ok(ok()));
-
-        let mut buffer = [0; 1024];
-
-        // Use poll() for efficient waiting instead of busy-polling
-        let poll_timeout = PollTimeout::from(100u16); // 100ms timeout
-
-        while running_clone.load(Ordering::SeqCst) {
-            // Create PollFd for the inotify file descriptor
-            let mut poll_fds = [PollFd::new(inotify.as_fd(), PollFlags::POLLIN)];
-
-            match poll(&mut poll_fds, poll_timeout) {
-                Ok(0) => {
-                    // Timeout - no events, loop back to check running flag
-                    continue;
-                }
-                Ok(_) => {
-                    // Events available, read them
-                    match inotify.read_events(&mut buffer) {
-                        Ok(events) => {
-                            for event in events {
-                                // Preserve the raw bytes of the filename. Linux filenames are
-                                // arbitrary byte sequences; a lossy UTF-8 conversion here would
-                                // silently drop information for non-UTF-8 names. The bytes are
-                                // sent as an Erlang binary (via OwnedBinary), which is fully
-                                // compatible with valid-UTF-8 names — Elixir strings are
-                                // binaries — and preserves bytes for non-UTF-8 names. Note that
-                                // a bare `Vec<u8>` would be encoded as a list of small integers
-                                // (a charlist), not a binary.
-                                let filename_bytes: Vec<u8> = event
-                                    .name
-                                    .map(|os_str| os_str.as_bytes().to_vec())
-                                    .unwrap_or_default();
-
-                                let mask_atoms = mask_to_atoms(event.mask);
-
-                                let sent = OwnedEnv::send_and_clear(&mut owned_env, &pid, |env| {
-                                    let mut bin = rustler::OwnedBinary::new(filename_bytes.len())
-                                        .expect("failed to allocate OwnedBinary for filename");
-                                    bin.as_mut_slice().copy_from_slice(&filename_bytes);
-                                    let filename_term = bin.release(env);
-                                    (inotify_event(), filename_term, mask_atoms).encode(env)
-                                });
-                                if sent.is_err() {
-                                    running_clone.store(false, Ordering::SeqCst);
-                                }
-
-                                if !running_clone.load(Ordering::SeqCst) {
-                                    break;
-                                }
-                            }
-                        }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // Spurious wakeup, continue polling
-                            continue;
-                        }
-                        Err(_err) => {
-                            // inotify read error, exit loop
-                            break;
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Poll error, exit loop
-                    break;
-                }
-            }
-        }
+    let resource = ResourceArc::new(WatcherResource {
+        inner: Mutex::new(WatcherResourceInner {
+            running,
+            watches,
+            wd,
+            watcher: Some(watcher),
+        }),
     });
 
-    match rx.recv() {
-        Ok(Ok(_)) => {
-            let resource = ResourceArc::new(WatcherResource {
-                inner: Mutex::new(WatcherResourceInner {
-                    running,
-                    watcher: Some(watcher), // down_called: false,
-                }),
+    Ok((ok(), resource))
+}
+
+/// Blocking read loop run on the watcher thread. Exits when stopped, when
+/// the recipient process is gone, on read errors, or once the watch has been
+/// removed by the kernel (`IN_IGNORED`) since no further events can arrive.
+fn read_loop(mut inotify: Inotify, pid: LocalPid, running: Arc<AtomicBool>) {
+    let mut owned_env = OwnedEnv::new();
+    let mut buffer = [0u8; 4096];
+
+    while running.load(Ordering::SeqCst) {
+        let events = match inotify.read_events_blocking(&mut buffer) {
+            Ok(events) => events,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+
+        for event in events {
+            if !running.load(Ordering::SeqCst) {
+                return;
+            }
+
+            // Preserve the raw bytes of the filename: Linux filenames are
+            // arbitrary byte sequences, so they are sent as an Erlang binary
+            // rather than a lossily converted string.
+            let name: &[u8] = event.name.map(|n| n.as_bytes()).unwrap_or_default();
+            let mask_atoms = mask_to_atoms(event.mask);
+
+            let sent = owned_env.send_and_clear(&pid, |env| {
+                let mut bin = rustler::OwnedBinary::new(name.len())
+                    .expect("failed to allocate OwnedBinary for filename");
+                bin.as_mut_slice().copy_from_slice(name);
+                (inotify_event(), bin.release(env), mask_atoms).encode(env)
             });
 
-            Ok((ok(), resource))
-        }
-        Ok(Err(msg)) => {
-            // eprintln!("Watcher startup failed: {}", msg);
-            Err(Error::Term(Box::new(msg)))
-        }
-        Err(_) => {
-            eprintln!("Failed to receive watcher startup result");
-            Err(Error::Term(Box::new(error())))
+            if sent.is_err() || event.mask.contains(EventMask::IGNORED) {
+                return;
+            }
         }
     }
 }
@@ -201,18 +150,14 @@ fn start_watcher<'a>(
 /// Stop watcher via resource handle
 #[rustler::nif]
 fn stop_watcher(resource: ResourceArc<WatcherResource>) -> Atom {
-    let mut inner = resource.inner.lock().unwrap();
-    // resource.running.store(false, Ordering::SeqCst);
-    inner.running.store(false, Ordering::SeqCst);
-
-    if let Some(watcher) = inner.watcher.take() {
-        let _ = watcher.join();
-    }
-
+    let mut inner = match resource.inner.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    inner.stop();
     stopped()
 }
 
-// rustler::init!("Elixir.Flier.Inotify", [start_watcher]);
 rustler::init!("Elixir.Flier.Inotify.Native");
 
 fn build_watch_mask(event_atoms: &[Atom]) -> WatchMask {
