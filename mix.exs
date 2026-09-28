@@ -30,7 +30,7 @@ defmodule Flier.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.37.1", optional: true},
+      {:rustler, "~> 0.37", optional: true},
       {:rustler_precompiled, "~> 0.8"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -81,7 +81,7 @@ defmodule Flier.MixProject do
         "rustler_precompiled.download Flier.Inotify.Native --all --print"
       ],
       tidewave:
-        "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, ip: {127, 0, 0, 1}, port: 4000) end)'"
+        "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, ip: {127, 0, 0, 1}, port: 4001) end)'"
     ]
   end
 end
