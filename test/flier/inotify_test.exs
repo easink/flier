@@ -16,14 +16,17 @@ defmodule Flier.InotifyTest do
 
   describe "start_watcher/3" do
     test "returns {:ok, ref} when watching a valid directory", %{tmp_dir: tmp_dir} do
-      assert {:ok, ref} = Flier.Inotify.start_watcher(tmp_dir, :all)
-      assert is_reference(ref)
+      assert {:ok, %Flier.Inotify.Watcher{ref: tag} = ref} =
+               Flier.Inotify.start_watcher(tmp_dir, :all)
+
+      assert is_reference(tag)
       Flier.Inotify.stop_watcher(ref)
     end
 
     test "returns {:ok, ref} with specific event mask", %{tmp_dir: tmp_dir} do
-      assert {:ok, ref} = Flier.Inotify.start_watcher(tmp_dir, [:create, :delete])
-      assert is_reference(ref)
+      assert {:ok, %Flier.Inotify.Watcher{} = ref} =
+               Flier.Inotify.start_watcher(tmp_dir, [:create, :delete])
+
       Flier.Inotify.stop_watcher(ref)
     end
 
@@ -76,7 +79,7 @@ defmodule Flier.InotifyTest do
       test_file = Path.join(tmp_dir, "test_create.txt")
       File.write!(test_file, "hello")
 
-      assert_receive {:inotify_event, filename, masks}, 1000
+      assert_receive {:inotify_event, _, filename, masks}, 1000
       assert filename == "test_create.txt"
       assert :create in masks
 
@@ -89,7 +92,7 @@ defmodule Flier.InotifyTest do
       test_file = Path.join(tmp_dir, "test_create_all.txt")
       File.write!(test_file, "hello")
 
-      assert_receive {:inotify_event, "test_create_all.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_create_all.txt", masks}, 1000
       assert :create in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -107,7 +110,7 @@ defmodule Flier.InotifyTest do
       # Modify the file
       File.write!(test_file, "modified content")
 
-      assert_receive {:inotify_event, "test_modify.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_modify.txt", masks}, 1000
       assert :modify in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -125,7 +128,7 @@ defmodule Flier.InotifyTest do
       # Delete the file
       File.rm!(test_file)
 
-      assert_receive {:inotify_event, "test_delete.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_delete.txt", masks}, 1000
       assert :delete in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -144,7 +147,7 @@ defmodule Flier.InotifyTest do
       {:ok, fd} = File.open(test_file, [:read])
       File.close(fd)
 
-      assert_receive {:inotify_event, "test_open.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_open.txt", masks}, 1000
       assert :open in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -159,7 +162,7 @@ defmodule Flier.InotifyTest do
       # File.write! opens, writes, and closes - should trigger close_write
       File.write!(test_file, "content")
 
-      assert_receive {:inotify_event, "test_close_write.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_close_write.txt", masks}, 1000
       assert :close_write in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -176,7 +179,7 @@ defmodule Flier.InotifyTest do
       {:ok, fd} = File.open(test_file, [:read])
       File.close(fd)
 
-      assert_receive {:inotify_event, "test_close_nowrite.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_close_nowrite.txt", masks}, 1000
       assert :close_nowrite in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -194,7 +197,7 @@ defmodule Flier.InotifyTest do
       # Read the file (triggers access)
       File.read!(test_file)
 
-      assert_receive {:inotify_event, "test_access.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_access.txt", masks}, 1000
       assert :access in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -213,7 +216,7 @@ defmodule Flier.InotifyTest do
       new_file = Path.join(tmp_dir, "test_moved.txt")
       File.rename!(test_file, new_file)
 
-      assert_receive {:inotify_event, "test_move_from.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_move_from.txt", masks}, 1000
       assert :moved_from in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -230,7 +233,7 @@ defmodule Flier.InotifyTest do
       new_file = Path.join(tmp_dir, "test_move_dest.txt")
       File.rename!(test_file, new_file)
 
-      assert_receive {:inotify_event, "test_move_dest.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_move_dest.txt", masks}, 1000
       assert :moved_to in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -245,7 +248,7 @@ defmodule Flier.InotifyTest do
       sub_dir = Path.join(tmp_dir, "test_subdir")
       File.mkdir!(sub_dir)
 
-      assert_receive {:inotify_event, "test_subdir", masks}, 1000
+      assert_receive {:inotify_event, _, "test_subdir", masks}, 1000
       assert :create in masks
       assert :isdir in masks
 
@@ -264,7 +267,7 @@ defmodule Flier.InotifyTest do
       # Change file permissions (triggers attrib)
       File.chmod!(test_file, 0o644)
 
-      assert_receive {:inotify_event, "test_attrib.txt", masks}, 1000
+      assert_receive {:inotify_event, _, "test_attrib.txt", masks}, 1000
       assert :attrib in masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -280,7 +283,7 @@ defmodule Flier.InotifyTest do
       File.write!(test_file, "initial")
 
       # Should receive create event
-      assert_receive {:inotify_event, "test_multi.txt", create_masks}, 1000
+      assert_receive {:inotify_event, _, "test_multi.txt", create_masks}, 1000
       assert :create in create_masks
 
       # Drain any additional events from the initial write (e.g., modify, close_write)
@@ -290,7 +293,7 @@ defmodule Flier.InotifyTest do
       File.write!(test_file, "modified")
 
       # Should receive modify event
-      assert_receive {:inotify_event, "test_multi.txt", modify_masks}, 1000
+      assert_receive {:inotify_event, _, "test_multi.txt", modify_masks}, 1000
       assert :modify in modify_masks
 
       # Drain any additional events from the modify operation
@@ -300,7 +303,7 @@ defmodule Flier.InotifyTest do
       File.rm!(test_file)
 
       # Should receive delete event
-      assert_receive {:inotify_event, "test_multi.txt", delete_masks}, 1000
+      assert_receive {:inotify_event, _, "test_multi.txt", delete_masks}, 1000
       assert :delete in delete_masks
 
       Flier.Inotify.stop_watcher(ref)
@@ -310,7 +313,7 @@ defmodule Flier.InotifyTest do
   # Helper to drain pending events for a specific file
   defp drain_events(filename) do
     receive do
-      {:inotify_event, ^filename, _} -> drain_events(filename)
+      {:inotify_event, _, ^filename, _} -> drain_events(filename)
     after
       50 -> :ok
     end
@@ -328,7 +331,7 @@ defmodule Flier.InotifyTest do
 
   defp collect_events_loop(acc, timeout_ms) do
     receive do
-      {:inotify_event, name, masks} ->
+      {:inotify_event, _, name, masks} ->
         collect_events_loop([{name, masks} | acc], timeout_ms)
     after
       timeout_ms -> Enum.reverse(acc)
@@ -346,7 +349,7 @@ defmodule Flier.InotifyTest do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:inotify_event, _name, masks} ->
+      {:inotify_event, _, _name, masks} ->
         if :ignored in masks do
           true
         else
@@ -378,6 +381,79 @@ defmodule Flier.InotifyTest do
     end
   end
 
+  describe "event tagging" do
+    test "events carry the watcher's ref", %{tmp_dir: tmp_dir} do
+      {:ok, %Flier.Inotify.Watcher{ref: tag} = watcher} =
+        Flier.Inotify.start_watcher(tmp_dir, [:create])
+
+      File.write!(Path.join(tmp_dir, "tagged.txt"), "x")
+
+      assert_receive {:inotify_event, ^tag, "tagged.txt", [:create]}, 1000
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
+    test "two watchers in one process are distinguishable by ref", %{tmp_dir: tmp1} do
+      tmp2 = make_tmp("flier_inotify_tag")
+      on_exit(fn -> File.rm_rf!(tmp2) end)
+
+      {:ok, w1} = Flier.Inotify.start_watcher(tmp1, [:create])
+      {:ok, w2} = Flier.Inotify.start_watcher(tmp2, [:create])
+      refute w1.ref == w2.ref
+
+      File.write!(Path.join(tmp1, "one.txt"), "x")
+      File.write!(Path.join(tmp2, "two.txt"), "x")
+
+      tag1 = w1.ref
+      tag2 = w2.ref
+      assert_receive {:inotify_event, ^tag1, "one.txt", _}, 1000
+      assert_receive {:inotify_event, ^tag2, "two.txt", _}, 1000
+
+      Flier.Inotify.stop_watcher(w1)
+      Flier.Inotify.stop_watcher(w2)
+    end
+
+    test "stream/2 ignores events from other watchers in the same process",
+         %{tmp_dir: tmp1} do
+      tmp2 = make_tmp("flier_inotify_other")
+      on_exit(fn -> File.rm_rf!(tmp2) end)
+
+      {:ok, other} = Flier.Inotify.start_watcher(tmp2, [:create])
+      File.write!(Path.join(tmp2, "other.txt"), "x")
+      tag = other.ref
+      # Make sure the foreign event is already sitting in the mailbox.
+      assert_receive {:inotify_event, ^tag, "other.txt", _} = foreign, 1000
+      send(self(), foreign)
+
+      Task.start(fn ->
+        Process.sleep(100)
+        File.write!(Path.join(tmp1, "mine.txt"), "x")
+      end)
+
+      assert [{"mine.txt", _}] = tmp1 |> Flier.Inotify.stream([:create]) |> Enum.take(1)
+      # The foreign event is left untouched for its owner.
+      assert_received {:inotify_event, ^tag, "other.txt", _}
+
+      Flier.Inotify.stop_watcher(other)
+    end
+
+    test "stream/2 flushes its leftover events when halted", %{tmp_dir: tmp_dir} do
+      Task.start(fn ->
+        Process.sleep(100)
+        for i <- 1..5, do: File.write!(Path.join(tmp_dir, "f#{i}"), "x")
+      end)
+
+      # Pause on the first element so the remaining events are already in the
+      # mailbox when the stream halts.
+      assert [_] =
+               tmp_dir
+               |> Flier.Inotify.stream([:create])
+               |> Stream.each(fn _ -> Process.sleep(200) end)
+               |> Enum.take(1)
+
+      refute_receive {:inotify_event, _, _, _}, 100
+    end
+  end
+
   describe "custom pid" do
     test "sends events to specified pid", %{tmp_dir: tmp_dir} do
       parent = self()
@@ -386,7 +462,7 @@ defmodule Flier.InotifyTest do
       receiver =
         spawn(fn ->
           receive do
-            {:inotify_event, filename, masks} ->
+            {:inotify_event, _, filename, masks} ->
               send(parent, {:received, filename, masks})
           end
         end)
@@ -418,7 +494,7 @@ defmodule Flier.InotifyTest do
       # Should receive events for all files
       received =
         for _ <- 1..5 do
-          assert_receive {:inotify_event, filename, _masks}, 1000
+          assert_receive {:inotify_event, _, filename, _masks}, 1000
           filename
         end
 
@@ -439,7 +515,7 @@ defmodule Flier.InotifyTest do
       File.write!(test_file, "should not trigger event")
 
       # Should not receive any event
-      refute_receive {:inotify_event, _, _}, 200
+      refute_receive {:inotify_event, _, _, _}, 200
     end
 
     test "raises for empty mask list", %{tmp_dir: tmp_dir} do
@@ -474,8 +550,8 @@ defmodule Flier.InotifyTest do
       File.write!(Path.join(tmp1, "a.txt"), "x")
       File.write!(Path.join(tmp2, "b.txt"), "x")
 
-      assert_receive {:inotify_event, name1, _}, 1000
-      assert_receive {:inotify_event, name2, _}, 1000
+      assert_receive {:inotify_event, _, name1, _}, 1000
+      assert_receive {:inotify_event, _, name2, _}, 1000
 
       assert Enum.sort([name1, name2]) == ["a.txt", "b.txt"]
 
@@ -519,6 +595,7 @@ defmodule Flier.InotifyTest do
       File.write!(f, "b")
 
       events = collect_events(2000)
+
       assert Enum.any?(events, fn {_, m} -> :create in m end),
              "expected at least one :create event in #{inspect(events)}"
 
@@ -571,10 +648,10 @@ defmodule Flier.InotifyTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1000
 
       # If the underlying NIF thread had leaked, it would still be polling and
-      # could send {:inotify_event, ...} to the now-dead pid (harmless) — but
+      # could send {:inotify_event, _, ...} to the now-dead pid (harmless) — but
       # critically, the test process must never see those events.
       File.write!(Path.join(tmp_dir, "after_exit.txt"), "x")
-      refute_receive {:inotify_event, _, _}, 200
+      refute_receive {:inotify_event, _, _, _}, 200
     end
 
     test "delivers UTF-8 filenames intact", %{tmp_dir: tmp_dir} do
@@ -582,7 +659,7 @@ defmodule Flier.InotifyTest do
       name = "αβγ-日本語.txt"
       File.write!(Path.join(tmp_dir, name), "x")
 
-      assert_receive {:inotify_event, ^name, _}, 1000
+      assert_receive {:inotify_event, _, ^name, _}, 1000
 
       Flier.Inotify.stop_watcher(ref)
     end
@@ -595,7 +672,7 @@ defmodule Flier.InotifyTest do
       path = :erlang.iolist_to_binary([tmp_dir, "/", bad])
       :ok = :file.write_file(path, "x")
 
-      assert_receive {:inotify_event, name, _}, 1000
+      assert_receive {:inotify_event, _, name, _}, 1000
       # Option B: the raw bytes are preserved as an Erlang binary.
       assert name == bad
       refute name == ""
@@ -609,7 +686,7 @@ defmodule Flier.InotifyTest do
       name = String.duplicate("x", 200) <> ".txt"
       File.write!(Path.join(tmp_dir, name), "x")
 
-      assert_receive {:inotify_event, ^name, _}, 1000
+      assert_receive {:inotify_event, _, ^name, _}, 1000
 
       Flier.Inotify.stop_watcher(ref)
     end
@@ -622,7 +699,7 @@ defmodule Flier.InotifyTest do
 
       received =
         for _ <- 1..500 do
-          assert_receive {:inotify_event, name, _}, 5000
+          assert_receive {:inotify_event, _, name, _}, 5000
           name
         end
 
@@ -653,7 +730,7 @@ defmodule Flier.InotifyTest do
       test_file = Path.join(tmp_dir, "after_gc.txt")
       File.write!(test_file, "should not trigger event")
 
-      refute_receive {:inotify_event, _, _}, 300
+      refute_receive {:inotify_event, _, _, _}, 300
     end
   end
 end

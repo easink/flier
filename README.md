@@ -8,11 +8,11 @@ Add some file functions in Elixir by adding some NIFs using Rustler.
 ## Examples (inotify)
 
 ``` elixir
-{:ok, ref} = Flier.Inotify.start_watcher("/tmp", [:create])
+{:ok, %Flier.Inotify.Watcher{ref: ref} = watcher} = Flier.Inotify.start_watcher("/tmp", [:create])
 receive do
-    {:inotify_event, file, mask} -> IO.puts("File '#{file}' triggered by #{inspect mask}")
+    {:inotify_event, ^ref, file, mask} -> IO.puts("File '#{file}' triggered by #{inspect mask}")
 end
-:stopped = Flier.Inotify.stop_watcher(ref)
+:stopped = Flier.Inotify.stop_watcher(watcher)
 ```
 
 ``` elixir

@@ -1,4 +1,5 @@
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
+use rustler::env::SavedTerm;
 use rustler::{Atom, Encoder, Error, LocalPid, NifResult, OwnedEnv, Resource, ResourceArc};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,6 +82,7 @@ fn start_watcher(
     path: String,
     event_list: Vec<Atom>,
     pid: rustler::Term,
+    tag: rustler::Term,
 ) -> NifResult<(Atom, ResourceArc<WatcherResource>)> {
     let pid = pid
         .decode::<LocalPid>()
@@ -92,9 +94,14 @@ fn start_watcher(
         .add(&path, build_watch_mask(&event_list))
         .map_err(|_| Error::Term(Box::new(failed_to_add_watcher())))?;
 
+    // The tag is copied into an env owned by the thread; it cannot be the
+    // resource itself, as the thread holding it would keep the resource alive.
+    let tag_env = OwnedEnv::new();
+    let tag = tag_env.save(tag);
+
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = running.clone();
-    let watcher = thread::spawn(move || read_loop(inotify, pid, thread_running));
+    let watcher = thread::spawn(move || read_loop(inotify, pid, (tag_env, tag), thread_running));
 
     let resource = ResourceArc::new(WatcherResource {
         inner: Mutex::new(WatcherResourceInner {
@@ -111,7 +118,12 @@ fn start_watcher(
 /// Blocking read loop run on the watcher thread. Exits when stopped, when
 /// the recipient process is gone, on read errors, or once the watch has been
 /// removed by the kernel (`IN_IGNORED`) since no further events can arrive.
-fn read_loop(mut inotify: Inotify, pid: LocalPid, running: Arc<AtomicBool>) {
+fn read_loop(
+    mut inotify: Inotify,
+    pid: LocalPid,
+    (tag_env, tag): (OwnedEnv, SavedTerm),
+    running: Arc<AtomicBool>,
+) {
     let mut owned_env = OwnedEnv::new();
     let mut buffer = [0u8; 4096];
 
@@ -137,7 +149,8 @@ fn read_loop(mut inotify: Inotify, pid: LocalPid, running: Arc<AtomicBool>) {
                 let mut bin = rustler::OwnedBinary::new(name.len())
                     .expect("failed to allocate OwnedBinary for filename");
                 bin.as_mut_slice().copy_from_slice(name);
-                (inotify_event(), bin.release(env), mask_atoms).encode(env)
+                let tag = tag_env.run(|tag_env| tag.load(tag_env).in_env(env));
+                (inotify_event(), tag, bin.release(env), mask_atoms).encode(env)
             });
 
             if sent.is_err() || event.mask.contains(EventMask::IGNORED) {

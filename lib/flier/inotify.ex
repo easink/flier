@@ -5,8 +5,10 @@ defmodule Flier.Inotify do
   This module provides two usage styles:
 
   1. **Message-based** — Start a watcher with `start_watcher/2,3`, receive
-     `{:inotify_event, filename, masks}` messages in a process, then stop
-     the watcher with `stop_watcher/1`.
+     `{:inotify_event, ref, filename, masks}` messages in a process, then stop
+     the watcher with `stop_watcher/1`. `ref` is the watcher's
+     `Flier.Inotify.Watcher` `:ref`, so events from several watchers in one
+     process can be told apart.
 
   2. **Stream-based** — Use `stream/2` to get a lazy `Stream` of
      `{filename, masks}` tuples. The underlying watcher is started and
@@ -53,14 +55,15 @@ defmodule Flier.Inotify do
 
   ### Message-based usage
 
-      {:ok, ref} = Flier.Inotify.start_watcher("/tmp", [:create, :delete])
+      {:ok, %Flier.Inotify.Watcher{ref: ref} = watcher} =
+        Flier.Inotify.start_watcher("/tmp", [:create, :delete])
 
       receive do
-        {:inotify_event, file, masks} ->
+        {:inotify_event, ^ref, file, masks} ->
           IO.puts("Event on \#{file}: \#{inspect(masks)}")
       end
 
-      :stopped = Flier.Inotify.stop_watcher(ref)
+      :stopped = Flier.Inotify.stop_watcher(watcher)
 
   ### Stream-based usage
 
@@ -71,6 +74,8 @@ defmodule Flier.Inotify do
       end)
       |> Stream.run()
   """
+
+  alias Flier.Inotify.Watcher
 
   @events [
     :create,
@@ -91,8 +96,9 @@ defmodule Flier.Inotify do
   @doc """
   Starts an inotify watcher on `path` for the given event `mask`.
 
-  Spawns a background OS thread that polls for inotify events and sends
-  `{:inotify_event, filename, masks}` messages to `pid` as they occur.
+  Spawns a background OS thread that reads inotify events and sends
+  `{:inotify_event, ref, filename, masks}` messages to `pid` as they occur,
+  where `ref` is the returned watcher's `:ref`.
 
   ## Parameters
 
@@ -104,20 +110,26 @@ defmodule Flier.Inotify do
 
   ## Returns
 
-  - `{:ok, ref}` — A reference to the watcher resource. Pass this to
-    `stop_watcher/1` when done.
+  - `{:ok, watcher}` — A `Flier.Inotify.Watcher` struct. Match events on its
+    `:ref` field and pass it to `stop_watcher/1` when done.
   - `{:error, reason}` — If the path does not exist or is not watchable.
 
   ## Examples
 
-      {:ok, ref} = Flier.Inotify.start_watcher("/tmp", [:create])
-      {:ok, ref} = Flier.Inotify.start_watcher("/tmp", :all)
-      {:ok, ref} = Flier.Inotify.start_watcher("/tmp", [:modify], some_pid)
+      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:create])
+      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", :all)
+      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:modify], some_pid)
   """
   @spec start_watcher(path :: String.t(), [atom()] | :all, pid()) ::
-          {:ok, reference()} | {:error, term()}
+          {:ok, Watcher.t()} | {:error, term()}
   def start_watcher(path, mask, pid \\ self()) do
-    Flier.Inotify.Native.start_watcher(path, validate_mask!(mask), pid)
+    mask = validate_mask!(mask)
+    ref = make_ref()
+
+    case Flier.Inotify.Native.start_watcher(path, mask, pid, ref) do
+      {:ok, resource} -> {:ok, %Watcher{ref: ref, resource: resource}}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp validate_mask!(:all), do: @events
@@ -146,12 +158,12 @@ defmodule Flier.Inotify do
   Signals the background OS thread to stop, waits for it to terminate, and
   releases the underlying inotify file descriptor.
 
-  The watcher resource is also stopped automatically when the reference is
-  garbage-collected by the BEAM.
+  The watcher is also stopped automatically when it is garbage-collected by
+  the BEAM. Events already delivered to the mailbox are not removed.
 
   ## Parameters
 
-  - `ref` — The reference returned by `start_watcher/2,3`.
+  - `watcher` — The `Flier.Inotify.Watcher` returned by `start_watcher/2,3`.
 
   ## Returns
 
@@ -159,11 +171,12 @@ defmodule Flier.Inotify do
 
   ## Examples
 
-      {:ok, ref} = Flier.Inotify.start_watcher("/tmp", [:create])
-      :stopped = Flier.Inotify.stop_watcher(ref)
+      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:create])
+      :stopped = Flier.Inotify.stop_watcher(watcher)
   """
-  @spec stop_watcher(reference()) :: :stopped
-  def stop_watcher(ref), do: Flier.Inotify.Native.stop_watcher(ref)
+  @spec stop_watcher(Watcher.t()) :: :stopped
+  def stop_watcher(%Watcher{resource: resource}),
+    do: Flier.Inotify.Native.stop_watcher(resource)
 
   @doc """
   Returns a lazy `Stream` of inotify events from `path`.
@@ -172,7 +185,9 @@ defmodule Flier.Inotify do
   `filename` is a string and `masks` is a list of event atoms.
 
   The stream starts a watcher when enumeration begins and stops it when the
-  stream is halted or the enumerating process exits. The stream is infinite
+  stream is halted or the enumerating process exits. On halt, any of its
+  events still in the mailbox are discarded; events from other watchers are
+  left untouched. The stream is infinite
   by default — use `Stream.take/2`, `Enum.take/2`, or similar to bound it.
 
   > #### Blocking {: .warning}
@@ -207,18 +222,28 @@ defmodule Flier.Inotify do
   def stream(path, mask \\ :all) do
     Stream.resource(
       fn ->
-        {:ok, ref} = Flier.Inotify.start_watcher(path, mask)
-        ref
+        {:ok, watcher} = start_watcher(path, mask)
+        watcher
       end,
-      fn ref ->
+      fn %Watcher{ref: ref} = watcher ->
         receive do
-          {:inotify_event, file, mask} -> {[{file, mask}], ref}
+          {:inotify_event, ^ref, file, masks} -> {[{file, masks}], watcher}
         end
-
-        # after
-        #   5000 -> {:halt, ref}
       end,
-      fn ref -> Flier.Inotify.stop_watcher(ref) end
+      fn %Watcher{ref: ref} = watcher ->
+        stop_watcher(watcher)
+        flush_events(ref)
+      end
     )
+  end
+
+  # The watcher thread is joined by stop_watcher/1, so no events for `ref`
+  # can arrive after this runs.
+  defp flush_events(ref) do
+    receive do
+      {:inotify_event, ^ref, _file, _masks} -> flush_events(ref)
+    after
+      0 -> :ok
+    end
   end
 end
