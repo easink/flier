@@ -338,9 +338,12 @@ defmodule Flier.EntriesTest do
       refute Path.basename(tmp_dir) in names
     end
 
-    test "missing root returns [] with default on_error" do
+    test "missing root raises even with default on_error: :skip" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
-      assert [] == Flier.Entries.stream(non, recursive: true) |> Enum.to_list()
+
+      assert_raise RuntimeError, ~r/cannot open directory .*not_found/, fn ->
+        Flier.Entries.stream(non, recursive: true) |> Enum.to_list()
+      end
     end
 
     test "missing root raises with on_error: :raise" do
@@ -503,8 +506,17 @@ defmodule Flier.EntriesTest do
     test "stream/2 raises on missing path in flat mode" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
-      assert_raise MatchError, fn ->
+      assert_raise RuntimeError, ~r/cannot open directory .*not_found/, fn ->
         Flier.Entries.stream(non) |> Enum.to_list()
+      end
+    end
+
+    test "stream/2 raises a descriptive error when path is a file", %{tmp_dir: tmp_dir} do
+      file = Path.join(tmp_dir, "file.txt")
+      File.write!(file, "x")
+
+      assert_raise RuntimeError, ~r/cannot open directory .*not_a_directory/, fn ->
+        Flier.Entries.stream(file) |> Enum.to_list()
       end
     end
 

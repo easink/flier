@@ -66,7 +66,7 @@ defmodule Flier.Entries do
   - `on_error: :skip | :raise` — Controls behaviour when a subdirectory cannot
     be opened (e.g. due to a permission error). `:skip` (default) silently
     continues the walk; `:raise` raises a `RuntimeError`. Only relevant when
-    `recursive: true`.
+    `recursive: true`. Failing to open the root `path` always raises.
 
   ## Returns
 
@@ -81,7 +81,8 @@ defmodule Flier.Entries do
 
       full = Path.expand(Path.join([root, entry.path, entry.name]))
 
-  Raises if `path` does not exist or cannot be opened.
+  Raises a `RuntimeError` when the stream is enumerated if `path` does not
+  exist or cannot be opened, regardless of `:on_error`.
 
   ## Examples
 
@@ -117,10 +118,7 @@ defmodule Flier.Entries do
 
   defp stream_flat(path) do
     Stream.resource(
-      fn ->
-        {:ok, ref} = Flier.Entries.Native.opendir(path)
-        ref
-      end,
+      fn -> open_dir!(path) end,
       fn ref ->
         case Flier.Entries.Native.readdir(ref) do
           {:ok, entry} -> {[entry], ref}
@@ -151,14 +149,12 @@ defmodule Flier.Entries do
 
         [{:pending, dir, rel_path, depth} | rest] ->
           case Flier.Entries.Native.opendir(dir) do
-            {:error, reason} ->
-              case on_error do
-                :skip ->
-                  {[], rest}
+            # The root must always be readable; on_error only governs subdirectories.
+            {:error, reason} when depth == 0 or on_error == :raise ->
+              raise_open_error(dir, reason)
 
-                :raise ->
-                  raise "Flier.Entries.stream/2: cannot open directory #{inspect(dir)}: #{reason}"
-              end
+            {:error, _reason} ->
+              {[], rest}
 
             {:ok, ref} ->
               # Transition to :reading — no entry emitted yet
@@ -202,6 +198,17 @@ defmodule Flier.Entries do
         end)
       end
     )
+  end
+
+  defp open_dir!(path) do
+    case Flier.Entries.Native.opendir(path) do
+      {:ok, ref} -> ref
+      {:error, reason} -> raise_open_error(path, reason)
+    end
+  end
+
+  defp raise_open_error(path, reason) do
+    raise "Flier.Entries.stream/2: cannot open directory #{inspect(path)}: #{reason}"
   end
 
   # Only descend into real directories, or symlinks whose target is a
