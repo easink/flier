@@ -64,9 +64,9 @@ defmodule Flier.Entries do
     symlink cycles.
 
   - `on_error: :skip | :raise` — Controls behaviour when a subdirectory cannot
-    be opened (e.g. due to a permission error). `:skip` (default) silently
+    be opened (e.g. due to a permission error) or reading it fails midway. `:skip` (default) silently
     continues the walk; `:raise` raises a `RuntimeError`. Only relevant when
-    `recursive: true`. Failing to open the root `path` always raises.
+    `recursive: true`. Failing to open or read the root `path` always raises.
 
   ## Returns
 
@@ -122,7 +122,8 @@ defmodule Flier.Entries do
       fn ref ->
         case Flier.Entries.Native.readdir(ref) do
           {:ok, entry} -> {[entry], ref}
-          {:error, _reason} -> {:halt, ref}
+          {:error, :end_of_directory} -> {:halt, ref}
+          {:error, reason} -> raise_read_error(path, reason)
         end
       end,
       fn ref -> Flier.Entries.Native.closedir(ref) end
@@ -163,9 +164,13 @@ defmodule Flier.Entries do
 
         [{:reading, ref, dir, rel_path, depth} | rest] ->
           case Flier.Entries.Native.readdir(ref) do
-            {:error, _} ->
-              # End of directory (or read error) — close handle and pop frame
+            {:error, :end_of_directory} ->
               Flier.Entries.Native.closedir(ref)
+              {[], rest}
+
+            {:error, reason} ->
+              Flier.Entries.Native.closedir(ref)
+              if depth == 0 or on_error == :raise, do: raise_read_error(dir, reason)
               {[], rest}
 
             {:ok, entry} ->
@@ -209,6 +214,10 @@ defmodule Flier.Entries do
 
   defp raise_open_error(path, reason) do
     raise "Flier.Entries.stream/2: cannot open directory #{inspect(path)}: #{reason}"
+  end
+
+  defp raise_read_error(path, reason) do
+    raise "Flier.Entries.stream/2: cannot read directory #{inspect(path)}: #{reason}"
   end
 
   # Only descend into real directories, or symlinks whose target is a
