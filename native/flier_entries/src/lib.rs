@@ -1,5 +1,7 @@
-use rustler::{Atom, Encoder, Env, NifResult, Resource, ResourceArc};
+use rustler::{Atom, Binary, Encoder, Env, NifResult, OwnedBinary, Resource, ResourceArc};
+use std::ffi::OsStr;
 use std::fs::{self, DirEntry, ReadDir};
+use std::os::unix::ffi::OsStrExt;
 use std::sync::Mutex;
 
 rustler::atoms! {
@@ -28,11 +30,12 @@ struct DirResource {
 #[rustler::resource_impl]
 impl Resource for DirResource {}
 
-/// A directory entry with name, type, and relative path from the walk root
+/// A directory entry with name, type, and relative path from the walk root.
+/// The name is the raw bytes from the OS (Linux filenames need not be UTF-8).
 #[derive(rustler::NifStruct)]
 #[module = "Flier.Entries.Entry"]
-struct Entry {
-    name: String,
+struct Entry<'a> {
+    name: Binary<'a>,
     r#type: Atom,
     path: String,
 }
@@ -52,10 +55,11 @@ impl Encoder for OpendirResult {
     }
 }
 
-/// Open a directory for reading
+/// Open a directory for reading. The path is taken as raw bytes so that
+/// non-UTF-8 paths work.
 #[rustler::nif(schedule = "DirtyIo")]
-fn opendir(path: String) -> OpendirResult {
-    match fs::read_dir(&path) {
+fn opendir(path: Binary) -> OpendirResult {
+    match fs::read_dir(OsStr::from_bytes(path.as_slice())) {
         Ok(read_dir) => {
             let resource = ResourceArc::new(DirResource {
                 inner: Mutex::new(Some(read_dir)),
@@ -82,7 +86,7 @@ fn readdir(env: Env, resource: ResourceArc<DirResource>) -> NifResult<rustler::T
         Some(read_dir) => {
             match read_dir.next() {
                 Some(Ok(entry)) => {
-                    let entry_struct = dir_entry_to_struct(&entry);
+                    let entry_struct = dir_entry_to_struct(env, &entry);
                     Ok((ok(), entry_struct).encode(env))
                 }
                 Some(Err(err)) => {
@@ -107,8 +111,12 @@ fn closedir(resource: ResourceArc<DirResource>) -> Atom {
 }
 
 /// Convert a DirEntry to our Entry struct
-fn dir_entry_to_struct(entry: &DirEntry) -> Entry {
-    let name = entry.file_name().to_string_lossy().into_owned();
+fn dir_entry_to_struct<'a>(env: Env<'a>, entry: &DirEntry) -> Entry<'a> {
+    let file_name = entry.file_name();
+    let bytes = file_name.as_bytes();
+    let mut bin = OwnedBinary::new(bytes.len()).expect("failed to allocate OwnedBinary");
+    bin.as_mut_slice().copy_from_slice(bytes);
+    let name = bin.release(env);
 
     let type_ = match entry.file_type() {
         Ok(ft) if ft.is_file() => file(),

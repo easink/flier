@@ -5,13 +5,21 @@ defmodule Flier.Entries do
   Each element of the stream is a `%Flier.Entries.Entry{}` struct with three
   fields:
 
-  - `:name` — The entry's file name as a string (not a full path).
+  - `:name` — The entry's file name (not a full path).
   - `:type` — One of `:file`, `:directory`, `:symlink`, or `:other`.
   - `:path` — Relative path from the walk root to the directory containing the
     entry. Always `"."` in flat (non-recursive) mode.
 
   The stream reads entries on demand, so arbitrarily large directories can be
   processed without loading all entries into memory at once.
+
+  > #### Filename encoding {: .info}
+  >
+  > Names (and the `:path` of entries below them) are binaries containing the
+  > raw bytes from the OS. Most are valid UTF-8 and can be used as ordinary
+  > Elixir strings. Names that are not valid UTF-8 (legal on Linux) keep every
+  > byte intact and can be passed back to file APIs unchanged, including as the
+  > `path` argument of `stream/2`.
 
   ## Examples
 

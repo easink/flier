@@ -503,6 +503,27 @@ defmodule Flier.EntriesTest do
       assert MapSet.equal?(names, MapSet.new(utf8))
     end
 
+    test "preserves raw bytes for non-UTF-8 filenames", %{tmp_dir: tmp_dir} do
+      bad = <<0xFF, 0xFE, 0xFD>>
+      :ok = :file.write_file(:erlang.iolist_to_binary([tmp_dir, "/", bad]), "x")
+
+      assert [%{name: ^bad, type: :file}] = tmp_dir |> Flier.Entries.stream() |> Enum.to_list()
+    end
+
+    test "recurses into directories with non-UTF-8 names", %{tmp_dir: tmp_dir} do
+      bad = <<"dir-", 0xFF, 0xFE>>
+      dir = :erlang.iolist_to_binary([tmp_dir, "/", bad])
+      :ok = :file.make_dir(dir)
+      :ok = :file.write_file(:erlang.iolist_to_binary([dir, "/nested.txt"]), "x")
+
+      entries =
+        Flier.Entries.stream(tmp_dir, recursive: true, on_error: :raise)
+        |> Enum.map(&{&1.path, &1.name})
+        |> Enum.sort()
+
+      assert entries == [{".", bad}, {bad, "nested.txt"}]
+    end
+
     test "stream/2 raises on missing path in flat mode" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
@@ -543,6 +564,14 @@ defmodule Flier.EntriesTest do
       assert {:ok, _} = Flier.Entries.Native.readdir(ref)
       Flier.Entries.Native.closedir(ref)
       assert {:error, :already_closed} = Flier.Entries.Native.readdir(ref)
+    end
+
+    test "opendir/1 accepts non-UTF-8 paths", %{tmp_dir: tmp_dir} do
+      dir = :erlang.iolist_to_binary([tmp_dir, "/", <<0xFF>>])
+      :ok = :file.make_dir(dir)
+
+      assert {:ok, ref} = Flier.Entries.Native.opendir(dir)
+      Flier.Entries.Native.closedir(ref)
     end
 
     test "opendir/1 with empty string returns an error" do

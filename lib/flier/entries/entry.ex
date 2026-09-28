@@ -4,7 +4,8 @@ defmodule Flier.Entries.Entry do
 
   ## Fields
 
-  - `:name` — The file name of the entry as a string (not a full path).
+  - `:name` — The file name of the entry (not a full path), as a binary of the
+    raw bytes from the OS. Usually valid UTF-8; see `Flier.Entries` for details.
   - `:type` — The kind of file-system object. One of:
     - `:file` — A regular file.
     - `:directory` — A directory.
