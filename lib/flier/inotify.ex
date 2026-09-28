@@ -28,11 +28,18 @@ defmodule Flier.Inotify do
   | `:close_nowrite` | A file opened read-only was closed |
   | `:open` | A file or directory was opened |
   | `:attrib` | File metadata (permissions, timestamps, etc.) changed |
-  | `:ignored` | The watch was removed (directory deleted or unmounted) |
-  | `:isdir` | Included in the event when the subject is a directory |
 
   Pass the special atom `:all` as the mask to subscribe to all of the above
-  events at once.
+  events at once. Unknown atoms raise an `ArgumentError`.
+
+  Events may additionally carry these flags, which are always reported by the
+  kernel and do not need to be subscribed to (they are accepted in a mask but
+  have no effect):
+
+  | Atom | Description |
+  |------|-------------|
+  | `:ignored` | The watch was removed (directory deleted or unmounted). No further events follow. |
+  | `:isdir` | The subject of the event is a directory |
 
   > #### Filename encoding {: .info}
   >
@@ -65,7 +72,7 @@ defmodule Flier.Inotify do
       |> Stream.run()
   """
 
-  @all [
+  @events [
     :create,
     :modify,
     :delete,
@@ -75,10 +82,11 @@ defmodule Flier.Inotify do
     :close_write,
     :close_nowrite,
     :open,
-    :attrib,
-    :ignored,
-    :isdir
+    :attrib
   ]
+
+  # Flags the kernel reports on its own; accepted in a mask but have no effect.
+  @report_only [:ignored, :isdir]
 
   @doc """
   Starts an inotify watcher on `path` for the given event `mask`.
@@ -90,7 +98,8 @@ defmodule Flier.Inotify do
 
   - `path` — Absolute path to the directory to watch.
   - `mask` — A list of event atoms to subscribe to (see module docs for the
-    full list), or the atom `:all` to subscribe to every event type.
+    full list), or the atom `:all` to subscribe to every event type. Raises
+    `ArgumentError` for unknown atoms or when no subscribable event is given.
   - `pid` — The process to deliver events to. Defaults to `self()`.
 
   ## Returns
@@ -107,12 +116,29 @@ defmodule Flier.Inotify do
   """
   @spec start_watcher(path :: String.t(), [atom()] | :all, pid()) ::
           {:ok, reference()} | {:error, term()}
-  def start_watcher(path, mask, pid \\ self())
+  def start_watcher(path, mask, pid \\ self()) do
+    Flier.Inotify.Native.start_watcher(path, validate_mask!(mask), pid)
+  end
 
-  def start_watcher(path, :all, pid), do: Flier.Inotify.Native.start_watcher(path, @all, pid)
+  defp validate_mask!(:all), do: @events
 
-  def start_watcher(path, mask, pid),
-    do: Flier.Inotify.Native.start_watcher(path, mask, pid)
+  defp validate_mask!(mask) when is_list(mask) do
+    case Enum.reject(mask, &(&1 in @events or &1 in @report_only)) do
+      [] -> :ok
+      unknown -> raise ArgumentError, "unknown inotify event(s): #{inspect(unknown)}"
+    end
+
+    if not Enum.any?(mask, &(&1 in @events)) do
+      raise ArgumentError,
+            "inotify mask must contain at least one event of #{inspect(@events)}, got: #{inspect(mask)}"
+    end
+
+    mask
+  end
+
+  defp validate_mask!(mask) do
+    raise ArgumentError, "inotify mask must be a list of events or :all, got: #{inspect(mask)}"
+  end
 
   @doc """
   Stops a running inotify watcher.
@@ -178,7 +204,7 @@ defmodule Flier.Inotify do
       end)
   """
   @spec stream(path :: String.t(), [atom()] | :all) :: Enumerable.t()
-  def stream(path, mask \\ @all) do
+  def stream(path, mask \\ :all) do
     Stream.resource(
       fn ->
         {:ok, ref} = Flier.Inotify.start_watcher(path, mask)

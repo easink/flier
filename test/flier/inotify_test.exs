@@ -442,9 +442,26 @@ defmodule Flier.InotifyTest do
       refute_receive {:inotify_event, _, _}, 200
     end
 
-    test "returns error for empty mask list", %{tmp_dir: tmp_dir} do
-      # Empty mask list is not allowed by the NIF
-      assert {:error, :failed_to_add_watcher} = Flier.Inotify.start_watcher(tmp_dir, [])
+    test "raises for empty mask list", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/at least one event/, fn ->
+        Flier.Inotify.start_watcher(tmp_dir, [])
+      end
+    end
+
+    test "raises for unknown mask atoms", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/:close_writ/, fn ->
+        Flier.Inotify.start_watcher(tmp_dir, [:create, :close_writ])
+      end
+    end
+
+    test "raises when mask only contains report-only flags", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/at least one event/, fn ->
+        Flier.Inotify.start_watcher(tmp_dir, [:isdir, :ignored])
+      end
+    end
+
+    test "raises for a mask that is neither a list nor :all", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, fn -> Flier.Inotify.start_watcher(tmp_dir, :create) end
     end
 
     test "two watchers on different dirs deliver independent events", %{tmp_dir: tmp1} do
