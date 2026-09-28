@@ -113,124 +113,92 @@ defmodule Flier.Entries do
   """
   @spec stream(path :: String.t(), opts :: keyword()) :: Enumerable.t()
   def stream(path, opts \\ []) do
-    if Keyword.get(opts, :recursive, false) do
-      stream_recursive(path, opts)
-    else
-      stream_flat(path)
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Flat (non-recursive) stream — original behaviour
-  # ---------------------------------------------------------------------------
-
-  defp stream_flat(path) do
-    Stream.resource(
-      fn -> open_dir!(path) end,
-      fn ref ->
-        case Flier.Entries.Native.readdir(ref) do
-          {:ok, entry} -> {[entry], ref}
-          {:error, :end_of_directory} -> {:halt, ref}
-          {:error, reason} -> raise_read_error(path, reason)
-        end
-      end,
-      fn ref -> Flier.Entries.Native.closedir(ref) end
-    )
-  end
-
-  # ---------------------------------------------------------------------------
-  # Recursive stream
-  # ---------------------------------------------------------------------------
-
-  defp stream_recursive(root, opts) do
-    max_depth = Keyword.get(opts, :max_depth, :infinity)
-    follow_symlinks = Keyword.get(opts, :follow_symlinks, false)
-    on_error = Keyword.get(opts, :on_error, :skip)
-
-    # State: stack of tagged frames.
-    #   {:pending, abs_path, rel_path, depth} — directory not yet opened
-    #   {:reading, ref, abs_path, rel_path, depth} — open handle, reading one entry at a time
-    Stream.resource(
-      fn -> [{:pending, root, ".", 0}] end,
-      fn
-        [] ->
-          {:halt, []}
-
-        [{:pending, dir, rel_path, depth} | rest] ->
-          case Flier.Entries.Native.opendir(dir) do
-            # The root must always be readable; on_error only governs subdirectories.
-            {:error, reason} when depth == 0 or on_error == :raise ->
-              raise_open_error(dir, reason)
-
-            {:error, _reason} ->
-              {[], rest}
-
-            {:ok, ref} ->
-              # Transition to :reading — no entry emitted yet
-              {[], [{:reading, ref, dir, rel_path, depth} | rest]}
-          end
-
-        [{:reading, ref, dir, rel_path, depth} | rest] ->
-          case Flier.Entries.Native.readdir(ref) do
-            {:error, :end_of_directory} ->
-              Flier.Entries.Native.closedir(ref)
-              {[], rest}
-
-            {:error, reason} ->
-              Flier.Entries.Native.closedir(ref)
-              if depth == 0 or on_error == :raise, do: raise_read_error(dir, reason)
-              {[], rest}
-
-            {:ok, entry} ->
-              tagged = %{entry | path: rel_path}
-
-              stack_tail = [{:reading, ref, dir, rel_path, depth} | rest]
-
-              sub_abs = Path.join(dir, entry.name)
-
-              new_stack =
-                if (max_depth == :infinity or depth < max_depth) and
-                     descend?(entry.type, sub_abs, follow_symlinks) do
-                  sub_rel =
-                    if rel_path == ".", do: entry.name, else: Path.join(rel_path, entry.name)
-
-                  # Push subdir as :pending on top of current :reading frame (DFS)
-                  [{:pending, sub_abs, sub_rel, depth + 1} | stack_tail]
-                else
-                  stack_tail
-                end
-
-              {[tagged], new_stack}
-          end
-      end,
-      fn stack ->
-        # Close any dir handles still open when the stream is halted early
-        Enum.each(stack, fn
-          {:reading, ref, _, _, _} -> Flier.Entries.Native.closedir(ref)
-          {:pending, _, _, _} -> :ok
-        end)
+    walk =
+      if Keyword.get(opts, :recursive, false) do
+        %{
+          max_depth: Keyword.get(opts, :max_depth, :infinity),
+          follow_symlinks: Keyword.get(opts, :follow_symlinks, false),
+          on_error: Keyword.get(opts, :on_error, :skip)
+        }
+      else
+        # A flat listing is a walk that never descends.
+        %{max_depth: 0, follow_symlinks: false, on_error: :raise}
       end
+
+    Stream.resource(
+      fn -> [{:pending, path, ".", 0}] end,
+      &next(&1, walk),
+      &close_all/1
     )
   end
 
-  defp open_dir!(path) do
-    case Flier.Entries.Native.opendir(path) do
-      {:ok, ref} -> ref
-      {:error, reason} -> raise_open_error(path, reason)
+  # The state is a depth-first stack of frames:
+  #   {:pending, dir, rel_path, depth}       — directory not yet opened
+  #   {:reading, ref, dir, rel_path, depth}  — open handle, read one entry per step
+  defp next([], _walk), do: {:halt, []}
+
+  defp next([{:pending, dir, rel_path, depth} | rest], walk) do
+    case Flier.Entries.Native.opendir(dir) do
+      {:ok, ref} ->
+        {[], [{:reading, ref, dir, rel_path, depth} | rest]}
+
+      # The root must always be readable; on_error only governs subdirectories.
+      {:error, reason} when depth == 0 or walk.on_error == :raise ->
+        raise_error("open", dir, reason)
+
+      {:error, _reason} ->
+        {[], rest}
     end
   end
 
-  defp raise_open_error(path, reason) do
-    raise "Flier.Entries.stream/2: cannot open directory #{inspect(path)}: #{reason}"
+  defp next([{:reading, ref, dir, rel_path, depth} = frame | rest], walk) do
+    case Flier.Entries.Native.readdir(ref) do
+      {:ok, entry} ->
+        stack = [frame | rest]
+
+        stack =
+          if depth_allowed?(depth, walk.max_depth) and
+               descend?(entry.type, dir, entry.name, walk.follow_symlinks) do
+            [
+              {:pending, Path.join(dir, entry.name), sub_path(rel_path, entry.name), depth + 1}
+              | stack
+            ]
+          else
+            stack
+          end
+
+        {[%{entry | path: rel_path}], stack}
+
+      {:error, :end_of_directory} ->
+        Flier.Entries.Native.closedir(ref)
+        {[], rest}
+
+      {:error, reason} ->
+        Flier.Entries.Native.closedir(ref)
+        if depth == 0 or walk.on_error == :raise, do: raise_error("read", dir, reason)
+        {[], rest}
+    end
   end
 
-  defp raise_read_error(path, reason) do
-    raise "Flier.Entries.stream/2: cannot read directory #{inspect(path)}: #{reason}"
+  # Close any directory handles still open when the stream halts early.
+  defp close_all(stack) do
+    for {:reading, ref, _, _, _} <- stack, do: Flier.Entries.Native.closedir(ref)
+    :ok
   end
+
+  defp depth_allowed?(_depth, :infinity), do: true
+  defp depth_allowed?(depth, max_depth), do: depth < max_depth
 
   # Only descend into real directories, or symlinks whose target is a
   # directory (broken links and links to files are yielded but not followed).
-  defp descend?(:directory, _path, _follow_symlinks), do: true
-  defp descend?(:symlink, path, true), do: File.dir?(path)
-  defp descend?(_type, _path, _follow_symlinks), do: false
+  defp descend?(:directory, _dir, _name, _follow_symlinks), do: true
+  defp descend?(:symlink, dir, name, true), do: File.dir?(Path.join(dir, name))
+  defp descend?(_type, _dir, _name, _follow_symlinks), do: false
+
+  defp sub_path(".", name), do: name
+  defp sub_path(rel_path, name), do: Path.join(rel_path, name)
+
+  defp raise_error(action, path, reason) do
+    raise "Flier.Entries.stream/2: cannot #{action} directory #{inspect(path)}: #{reason}"
+  end
 end
