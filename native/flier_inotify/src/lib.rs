@@ -79,7 +79,7 @@ impl Drop for WatcherResource {
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn start_watcher(
-    path: String,
+    path: rustler::Binary,
     event_list: Vec<Atom>,
     pid: rustler::Term,
     tag: rustler::Term,
@@ -91,7 +91,10 @@ fn start_watcher(
     let inotify = Inotify::init().map_err(|_| Error::Term(Box::new(init_failed())))?;
     let mut watches = inotify.watches();
     let wd = watches
-        .add(&path, build_watch_mask(&event_list))
+        .add(
+            std::ffi::OsStr::from_bytes(path.as_slice()),
+            build_watch_mask(&event_list),
+        )
         .map_err(|_| Error::Term(Box::new(failed_to_add_watcher())))?;
 
     // The tag is copied into an env owned by the thread; it cannot be the

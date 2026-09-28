@@ -30,6 +30,17 @@ defmodule Flier.InotifyTest do
       Flier.Inotify.stop_watcher(ref)
     end
 
+    test "watches a directory with a non-UTF-8 name", %{tmp_dir: tmp_dir} do
+      dir = :erlang.iolist_to_binary([tmp_dir, "/", <<0xFF, 0xFE>>])
+      :ok = :file.make_dir(dir)
+
+      assert {:ok, %{ref: ref} = watcher} = Flier.Inotify.start_watcher(dir, [:create])
+      :ok = :file.write_file(:erlang.iolist_to_binary([dir, "/inside.txt"]), "x")
+
+      assert_receive {:inotify_event, ^ref, "inside.txt", _}, 1000
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
     test "returns {:error, :failed_to_add_watcher} for non-existent path" do
       non_existent =
         "/tmp/flier_test_does_not_exist_#{System.unique_integer([:positive])}"
