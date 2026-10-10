@@ -20,16 +20,26 @@ defmodule Flier.EntriesTest do
       Flier.Entries.Native.closedir(ref)
     end
 
-    test "returns {:error, :not_found} for non-existent path" do
+    test "returns {:error, :enoent} for non-existent path" do
       non_existent =
         "/tmp/flier_test_does_not_exist_#{System.unique_integer([:positive])}"
-      assert {:error, :not_found} = Flier.Entries.Native.opendir(non_existent)
+
+      assert {:error, :enoent} = Flier.Entries.Native.opendir(non_existent)
     end
 
-    test "returns {:error, :not_a_directory} for file path", %{tmp_dir: tmp_dir} do
+    test "returns {:error, :enotdir} for file path", %{tmp_dir: tmp_dir} do
       file_path = Path.join(tmp_dir, "test_file.txt")
       File.write!(file_path, "content")
-      assert {:error, :not_a_directory} = Flier.Entries.Native.opendir(file_path)
+      assert {:error, :enotdir} = Flier.Entries.Native.opendir(file_path)
+    end
+
+    test "returns {:error, :eacces} for an unreadable directory", %{tmp_dir: tmp_dir} do
+      dir = Path.join(tmp_dir, "no_access")
+      File.mkdir!(dir)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = Flier.Entries.Native.opendir(dir)
     end
   end
 
@@ -246,6 +256,7 @@ defmodule Flier.EntriesTest do
       # Put the target file in an external dir — only reachable via the symlink
       external =
         Path.join(System.tmp_dir!(), "flier_ext_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(external)
       File.write!(Path.join(external, "external.txt"), "content")
       File.ln_s!(external, Path.join(tmp_dir, "link_dir"))
@@ -265,6 +276,7 @@ defmodule Flier.EntriesTest do
       # Same setup: target only reachable via symlink
       external =
         Path.join(System.tmp_dir!(), "flier_ext_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(external)
       File.write!(Path.join(external, "external.txt"), "content")
       File.ln_s!(external, Path.join(tmp_dir, "link_dir"))
@@ -341,7 +353,7 @@ defmodule Flier.EntriesTest do
     test "missing root raises even with default on_error: :skip" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
-      assert_raise RuntimeError, ~r/cannot open directory .*not_found/, fn ->
+      assert_raise RuntimeError, ~r/cannot open directory .*enoent/, fn ->
         Flier.Entries.stream(non, recursive: true) |> Enum.to_list()
       end
     end
@@ -527,7 +539,7 @@ defmodule Flier.EntriesTest do
     test "stream/2 raises on missing path in flat mode" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
-      assert_raise RuntimeError, ~r/cannot open directory .*not_found/, fn ->
+      assert_raise RuntimeError, ~r/cannot open directory .*enoent/, fn ->
         Flier.Entries.stream(non) |> Enum.to_list()
       end
     end
@@ -536,7 +548,7 @@ defmodule Flier.EntriesTest do
       file = Path.join(tmp_dir, "file.txt")
       File.write!(file, "x")
 
-      assert_raise RuntimeError, ~r/cannot open directory .*not_a_directory/, fn ->
+      assert_raise RuntimeError, ~r/cannot open directory .*enotdir/, fn ->
         Flier.Entries.stream(file) |> Enum.to_list()
       end
     end
@@ -575,8 +587,8 @@ defmodule Flier.EntriesTest do
     end
 
     test "opendir/1 with empty string returns an error" do
-      # On Linux, fs::read_dir("") returns ENOENT, mapped to :not_found.
-      assert {:error, :not_found} = Flier.Entries.Native.opendir("")
+      # On Linux, fs::read_dir("") returns ENOENT.
+      assert {:error, :enoent} = Flier.Entries.Native.opendir("")
     end
 
     test "opendir/1 accepts trailing slash", %{tmp_dir: tmp_dir} do

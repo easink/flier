@@ -1,0 +1,9 @@
+[package]
+name = "flier_common"
+version = "0.1.0"
+authors = []
+edition = "2021"
+
+[dependencies]
+rustler.workspace = true
+libc = "0.2"

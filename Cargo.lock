@@ -15,9 +15,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "flier_common"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustler",
+]
+
+[[package]]
 name = "flier_entries"
 version = "0.1.0"
 dependencies = [
+ "flier_common",
  "rustler",
 ]
 
@@ -25,6 +34,7 @@ dependencies = [
 name = "flier_inotify"
 version = "0.1.0"
 dependencies = [
+ "flier_common",
  "inotify",
  "rustler",
 ]

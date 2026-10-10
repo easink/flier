@@ -41,12 +41,20 @@ defmodule Flier.InotifyTest do
       Flier.Inotify.stop_watcher(watcher)
     end
 
-    test "returns {:error, :failed_to_add_watcher} for non-existent path" do
+    test "returns {:error, :enoent} for non-existent path" do
       non_existent =
         "/tmp/flier_test_does_not_exist_#{System.unique_integer([:positive])}"
 
-      assert {:error, :failed_to_add_watcher} =
-               Flier.Inotify.start_watcher(non_existent, :all)
+      assert {:error, :enoent} = Flier.Inotify.start_watcher(non_existent, :all)
+    end
+
+    test "returns {:error, :eacces} for an unreadable directory", %{tmp_dir: tmp_dir} do
+      dir = Path.join(tmp_dir, "no_access")
+      File.mkdir!(dir)
+      File.chmod!(dir, 0o000)
+      on_exit(fn -> File.chmod(dir, 0o755) end)
+
+      assert {:error, :eacces} = Flier.Inotify.start_watcher(dir, :all)
     end
   end
 

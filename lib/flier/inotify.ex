@@ -112,7 +112,11 @@ defmodule Flier.Inotify do
 
   - `{:ok, watcher}` — A `Flier.Inotify.Watcher` struct. Match events on its
     `:ref` field and pass it to `stop_watcher/1` when done.
-  - `{:error, reason}` — If the path does not exist or is not watchable.
+  - `{:error, reason}` — If the path cannot be watched. `reason` is a POSIX
+    error atom, as returned by `File` functions, for example `:enoent` (no
+    such path), `:eacces` (no read permission) or `:enospc` (the per-user
+    inotify watch limit, `fs.inotify.max_user_watches`, is reached).
+    `:file.format_error/1` turns it into a readable message.
 
   ## Examples
 
@@ -121,7 +125,7 @@ defmodule Flier.Inotify do
       {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:modify], some_pid)
   """
   @spec start_watcher(path :: String.t(), [atom()] | :all, pid()) ::
-          {:ok, Watcher.t()} | {:error, term()}
+          {:ok, Watcher.t()} | {:error, File.posix() | :unknown}
   def start_watcher(path, mask, pid \\ self()) do
     mask = validate_mask!(mask)
     ref = make_ref()

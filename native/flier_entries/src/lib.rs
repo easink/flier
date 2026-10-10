@@ -1,3 +1,4 @@
+use flier_common::errno_atom;
 use rustler::{Atom, Binary, Env, OwnedBinary, Resource, ResourceArc};
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, ReadDir};
@@ -11,11 +12,7 @@ rustler::atoms! {
     directory,
     symlink,
     other,
-    // Error reasons
-    not_found,
-    permission_denied,
-    not_a_directory,
-    io_error,
+    // Error reasons (OS errors are reported as errno atoms)
     already_closed,
     end_of_directory,
 }
@@ -39,11 +36,11 @@ struct Entry<'a> {
 }
 
 /// Open a directory for reading. The path is taken as raw bytes so that
-/// non-UTF-8 paths work. Returns `{:ok, ref}` or `{:error, reason}`.
+/// non-UTF-8 paths work. Returns `{:ok, ref}` or `{:error, errno}`.
 #[rustler::nif(schedule = "DirtyIo")]
-fn opendir(path: Binary) -> Result<ResourceArc<DirResource>, Atom> {
+fn opendir(env: Env, path: Binary) -> Result<ResourceArc<DirResource>, Atom> {
     let read_dir =
-        fs::read_dir(OsStr::from_bytes(path.as_slice())).map_err(|e| io_error_to_atom(&e))?;
+        fs::read_dir(OsStr::from_bytes(path.as_slice())).map_err(|e| errno_atom(env, &e))?;
 
     Ok(ResourceArc::new(DirResource {
         inner: Mutex::new(Some(read_dir)),
@@ -59,7 +56,7 @@ fn readdir(env: Env, resource: ResourceArc<DirResource>) -> Result<Entry, Atom> 
 
     match read_dir.next() {
         Some(Ok(entry)) => Ok(dir_entry_to_struct(env, &entry)),
-        Some(Err(err)) => Err(io_error_to_atom(&err)),
+        Some(Err(err)) => Err(errno_atom(env, &err)),
         None => Err(end_of_directory()),
     }
 }
@@ -91,18 +88,6 @@ fn dir_entry_to_struct<'a>(env: Env<'a>, entry: &DirEntry) -> Entry<'a> {
         name,
         r#type: type_,
         path: ".".to_string(),
-    }
-}
-
-/// Convert std::io::Error to an atom
-fn io_error_to_atom(err: &std::io::Error) -> Atom {
-    use std::io::ErrorKind;
-
-    match err.kind() {
-        ErrorKind::NotFound => not_found(),
-        ErrorKind::PermissionDenied => permission_denied(),
-        ErrorKind::NotADirectory => not_a_directory(),
-        _ => io_error(),
     }
 }
 

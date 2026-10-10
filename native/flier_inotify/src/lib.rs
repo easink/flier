@@ -1,17 +1,14 @@
+use flier_common::errno_atom;
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
 use rustler::env::SavedTerm;
-use rustler::{Atom, Encoder, Error, LocalPid, NifResult, OwnedEnv, Resource, ResourceArc};
+use rustler::{Atom, Encoder, Env, LocalPid, OwnedEnv, Resource, ResourceArc};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 rustler::atoms! {
-    ok,
     stopped,
-    init_failed,
-    failed_to_add_watcher,
-    no_pid,
     // event type
     inotify_event,
     // inotify events
@@ -77,25 +74,24 @@ impl Drop for WatcherResource {
     }
 }
 
+/// Start watching `path`. Returns `{:ok, resource}` or `{:error, errno}`
+/// with a POSIX errno atom such as `:enoent`, `:eacces` or `:enospc`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn start_watcher(
+    env: Env,
     path: rustler::Binary,
     event_list: Vec<Atom>,
-    pid: rustler::Term,
+    pid: LocalPid,
     tag: rustler::Term,
-) -> NifResult<(Atom, ResourceArc<WatcherResource>)> {
-    let pid = pid
-        .decode::<LocalPid>()
-        .map_err(|_| Error::Term(Box::new(no_pid())))?;
-
-    let inotify = Inotify::init().map_err(|_| Error::Term(Box::new(init_failed())))?;
+) -> Result<ResourceArc<WatcherResource>, Atom> {
+    let inotify = Inotify::init().map_err(|e| errno_atom(env, &e))?;
     let mut watches = inotify.watches();
     let wd = watches
         .add(
             std::ffi::OsStr::from_bytes(path.as_slice()),
             build_watch_mask(&event_list),
         )
-        .map_err(|_| Error::Term(Box::new(failed_to_add_watcher())))?;
+        .map_err(|e| errno_atom(env, &e))?;
 
     // The tag is copied into an env owned by the thread; it cannot be the
     // resource itself, as the thread holding it would keep the resource alive.
@@ -115,7 +111,7 @@ fn start_watcher(
         }),
     });
 
-    Ok((ok(), resource))
+    Ok(resource)
 }
 
 /// Blocking read loop run on the watcher thread. Exits when stopped, when

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 
-members = ["native/flier_inotify", "native/flier_entries"]
+members = ["native/flier_common", "native/flier_inotify", "native/flier_entries"]
 
 [workspace.dependencies]
 rustler = "0.38.0"
