@@ -68,6 +68,14 @@ defmodule Flier.MixProject do
     ]
   end
 
+  # Mix runs a task only once per invocation, so listing the download task
+  # twice in an alias would skip the second crate; rerun it explicitly.
+  defp gen_checksum(_args) do
+    for module <- ~w(Flier.Entries.Native Flier.Inotify.Native) do
+      Mix.Task.rerun("rustler_precompiled.download", [module, "--all", "--print"])
+    end
+  end
+
   defp aliases do
     [
       "format.all": ["format", "rust.fmt"],
@@ -79,10 +87,7 @@ defmodule Flier.MixProject do
         "cmd cargo fmt --manifest-path=native/flier_inotify/Cargo.toml --all",
         "cmd cargo fmt --manifest-path=native/flier_entries/Cargo.toml --all"
       ],
-      "gen.checksum": [
-        "rustler_precompiled.download Flier.Entries.Native --all --print",
-        "rustler_precompiled.download Flier.Inotify.Native --all --print"
-      ],
+      "gen.checksum": &gen_checksum/1,
       tidewave:
         "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, ip: {127, 0, 0, 1}, port: 4001) end)'"
     ]
