@@ -35,7 +35,8 @@ a process:
   Flier.Inotify.start_watcher("/tmp", [:create, :delete])
 
 receive do
-  {:inotify_event, ^ref, file, masks} -> IO.puts("#{file}: #{inspect(masks)}")
+  {:inotify_event, ^ref, %Flier.Inotify.Event{name: name, masks: masks}} ->
+    IO.puts("#{name}: #{inspect(masks)}")
 end
 
 :stopped = Flier.Inotify.stop_watcher(watcher)
@@ -46,8 +47,11 @@ Or as a stream, which starts and stops the watcher for you:
 ``` elixir
 "/tmp"
 |> Flier.Inotify.stream([:close_write])
-|> Enum.each(fn {file, masks} -> IO.puts("#{file}: #{inspect(masks)}") end)
+|> Enum.each(fn event -> IO.puts("#{event.name}: #{inspect(event.masks)}") end)
 ```
+
+The `:moved_from` and `:moved_to` events of a rename carry the same
+`:cookie`, so the two halves can be paired up.
 
 Errors are POSIX error atoms, as with `File`:
 

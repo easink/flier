@@ -1,7 +1,7 @@
 use flier_common::errno_atom;
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
 use rustler::env::SavedTerm;
-use rustler::{Atom, Encoder, Env, LocalPid, OwnedEnv, Resource, ResourceArc};
+use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,16 @@ rustler::atoms! {
     stopped,
     inotify_event,
     inotify_error,
+}
+
+/// `%Flier.Inotify.Event{}`. The name is the raw bytes from the kernel, as
+/// Linux filenames are arbitrary byte sequences.
+#[derive(rustler::NifStruct)]
+#[module = "Flier.Inotify.Event"]
+struct Event<'a> {
+    name: Binary<'a>,
+    masks: Vec<Atom>,
+    cookie: u32,
 }
 
 /// Handle to the background reader thread.
@@ -146,15 +156,19 @@ fn read_loop(
             let names = mask_names(event.mask);
 
             let sent = owned_env.send_and_clear(&pid, |env| {
-                let mut bin = rustler::OwnedBinary::new(name.len())
-                    .expect("failed to allocate OwnedBinary for filename");
+                let mut bin = NewBinary::new(env, name.len());
                 bin.as_mut_slice().copy_from_slice(name);
                 let tag = tag_env.run(|tag_env| tag.load(tag_env).in_env(env));
                 let masks: Vec<Atom> = names
                     .iter()
                     .map(|name| Atom::from_str(env, name).expect("event names are valid atoms"))
                     .collect();
-                (inotify_event(), tag, bin.release(env), masks).encode(env)
+                let msg = Event {
+                    name: bin.into(),
+                    masks,
+                    cookie: event.cookie,
+                };
+                (inotify_event(), tag, msg).encode(env)
             });
 
             if sent.is_err() || event.mask.contains(EventMask::IGNORED) {

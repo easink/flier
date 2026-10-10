@@ -46,8 +46,8 @@ defmodule Flier do
       # Watch /tmp for file creations
       "/tmp"
       |> Flier.Inotify.stream([:create])
-      |> Stream.each(fn {file, masks} ->
-        IO.puts("Created: \#{file} (masks: \#{inspect(masks)})")
+      |> Stream.each(fn event ->
+        IO.puts("Created: \#{event.name} (masks: \#{inspect(event.masks)})")
       end)
       |> Stream.run()
 

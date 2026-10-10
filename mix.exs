@@ -45,7 +45,7 @@ defmodule Flier.MixProject do
       main: "Flier",
       extras: ["README.md"],
       groups_for_modules: [
-        "File watching": [Flier.Inotify, Flier.Inotify.Watcher],
+        "File watching": [Flier.Inotify, Flier.Inotify.Watcher, Flier.Inotify.Event],
         "Directory listing": [Flier.Entries, Flier.Entries.Entry]
       ]
     ]

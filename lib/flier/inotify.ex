@@ -5,14 +5,18 @@ defmodule Flier.Inotify do
   This module provides two usage styles:
 
   1. **Message-based** — Start a watcher with `start_watcher/2,3`, receive
-     `{:inotify_event, ref, filename, masks}` messages in a process, then stop
-     the watcher with `stop_watcher/1`. `ref` is the watcher's
+     `{:inotify_event, ref, %Flier.Inotify.Event{}}` messages in a process,
+     then stop the watcher with `stop_watcher/1`. `ref` is the watcher's
      `Flier.Inotify.Watcher` `:ref`, so events from several watchers in one
      process can be told apart.
 
   2. **Stream-based** — Use `stream/2` to get a lazy `Stream` of
-     `{filename, masks}` tuples. The underlying watcher is started and
+     `Flier.Inotify.Event` structs. The underlying watcher is started and
      stopped automatically.
+
+  Each event carries the file `:name`, the `:masks` set on it, and a
+  `:cookie` that links the `:moved_from` and `:moved_to` halves of a rename.
+  See `Flier.Inotify.Event`.
 
   ## Event masks
 
@@ -66,8 +70,8 @@ defmodule Flier.Inotify do
         Flier.Inotify.start_watcher("/tmp", [:create, :delete])
 
       receive do
-        {:inotify_event, ^ref, file, masks} ->
-          IO.puts("Event on \#{file}: \#{inspect(masks)}")
+        {:inotify_event, ^ref, %Flier.Inotify.Event{name: name, masks: masks}} ->
+          IO.puts("Event on \#{name}: \#{inspect(masks)}")
       end
 
       :stopped = Flier.Inotify.stop_watcher(watcher)
@@ -76,13 +80,13 @@ defmodule Flier.Inotify do
 
       "/tmp"
       |> Flier.Inotify.stream([:close_write])
-      |> Stream.each(fn {file, masks} ->
-        IO.puts("\#{file} was written and closed (masks: \#{inspect(masks)})")
+      |> Stream.each(fn %Flier.Inotify.Event{name: name} ->
+        IO.puts("\#{name} was written and closed")
       end)
       |> Stream.run()
   """
 
-  alias Flier.Inotify.Watcher
+  alias Flier.Inotify.{Event, Watcher}
 
   @events [
     :create,
@@ -104,8 +108,8 @@ defmodule Flier.Inotify do
   Starts an inotify watcher on `path` for the given event `mask`.
 
   Spawns a background OS thread that reads inotify events and sends
-  `{:inotify_event, ref, filename, masks}` messages to `pid` as they occur,
-  where `ref` is the returned watcher's `:ref`.
+  `{:inotify_event, ref, %Flier.Inotify.Event{}}` messages to `pid` as they
+  occur, where `ref` is the returned watcher's `:ref`.
 
   If reading events fails, the watcher sends a final
   `{:inotify_error, ref, reason}` message, where `reason` is a POSIX error
@@ -196,8 +200,7 @@ defmodule Flier.Inotify do
   @doc """
   Returns a lazy `Stream` of inotify events from `path`.
 
-  Each element emitted by the stream is a `{filename, masks}` tuple, where
-  `filename` is a string and `masks` is a list of event atoms.
+  Each element emitted by the stream is a `Flier.Inotify.Event` struct.
 
   The stream starts a watcher when enumeration begins and stops it when the
   stream is halted or the enumerating process exits. On halt, any of its
@@ -231,17 +234,17 @@ defmodule Flier.Inotify do
       "/tmp"
       |> Flier.Inotify.stream([:close_write])
       |> Enum.take(5)
-      |> Enum.each(fn {file, masks} -> IO.inspect({file, masks}) end)
+      |> Enum.each(&IO.inspect/1)
 
       # Run indefinitely in a task
       Task.start(fn ->
         "/var/log"
         |> Flier.Inotify.stream([:modify])
-        |> Stream.each(fn {file, _masks} -> IO.puts("Modified: \#{file}") end)
+        |> Stream.each(fn %Flier.Inotify.Event{name: name} -> IO.puts("Modified: \#{name}") end)
         |> Stream.run()
       end)
   """
-  @spec stream(path :: String.t(), [atom()] | :all) :: Enumerable.t()
+  @spec stream(path :: String.t(), [atom()] | :all) :: Enumerable.t(Event.t())
   def stream(path, mask \\ :all) do
     validate_mask!(mask)
 
@@ -267,10 +270,10 @@ defmodule Flier.Inotify do
 
   defp next_event({%Watcher{ref: ref} = watcher, :running}, path) do
     receive do
-      {:inotify_event, ^ref, file, masks} ->
+      {:inotify_event, ^ref, %Event{masks: masks} = event} ->
         # :ignored means the watch is gone; no further events can follow.
         status = if :ignored in masks, do: :done, else: :running
-        {[{file, masks}], {watcher, status}}
+        {[event], {watcher, status}}
 
       {:inotify_error, ^ref, reason} ->
         raise File.Error, reason: reason, action: "read events from directory", path: path
@@ -281,7 +284,7 @@ defmodule Flier.Inotify do
   # can arrive after this runs.
   defp flush_events(ref) do
     receive do
-      {:inotify_event, ^ref, _file, _masks} -> flush_events(ref)
+      {:inotify_event, ^ref, _event} -> flush_events(ref)
       {:inotify_error, ^ref, _reason} -> flush_events(ref)
     after
       0 -> :ok

@@ -9,7 +9,7 @@ defmodule Flier.Inotify.Watcher do
         Flier.Inotify.start_watcher("/tmp", [:create])
 
       receive do
-        {:inotify_event, ^ref, file, masks} -> {file, masks}
+        {:inotify_event, ^ref, %Flier.Inotify.Event{} = event} -> event
       end
 
   All other fields are private. The watcher is stopped automatically when the
