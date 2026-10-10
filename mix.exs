@@ -79,14 +79,8 @@ defmodule Flier.MixProject do
   defp aliases do
     [
       "format.all": ["format", "rust.fmt"],
-      "rust.lint": [
-        "cmd cargo clippy --manifest-path=native/flier_inotify/Cargo.toml -- -Dwarnings",
-        "cmd cargo clippy --manifest-path=native/flier_entries/Cargo.toml -- -Dwarnings"
-      ],
-      "rust.fmt": [
-        "cmd cargo fmt --manifest-path=native/flier_inotify/Cargo.toml --all",
-        "cmd cargo fmt --manifest-path=native/flier_entries/Cargo.toml --all"
-      ],
+      "rust.lint": "cmd cargo clippy --workspace --all-targets -- -Dwarnings",
+      "rust.fmt": "cmd cargo fmt --all",
       "gen.checksum": &gen_checksum/1,
       tidewave:
         "run --no-halt -e 'Agent.start(fn -> Bandit.start_link(plug: Tidewave, ip: {127, 0, 0, 1}, port: 4001) end)'"
