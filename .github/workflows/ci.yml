@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  # Build the NIFs from source instead of downloading released artifacts.
+  FLIER_BUILD: "1"
+  MIX_ENV: test
+
+jobs:
+  test:
+    name: Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported Elixir.
+          - elixir: "1.17"
+            otp: "27"
+          # Latest; also runs the format, lint and type checks.
+          - elixir: "1.20"
+            otp: "29"
+            lint: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-
+
+      - run: mix deps.get
+
+      - run: mix compile --warnings-as-errors
+
+      - run: mix test --include slow
+
+      - run: cargo test --workspace
+
+      - name: Check formatting
+        if: matrix.lint
+        run: |
+          mix format --check-formatted
+          cargo fmt --all -- --check
+
+      - name: Lint
+        if: matrix.lint
+        run: |
+          mix credo
+          cargo clippy --workspace --all-targets -- -Dwarnings
+
+      - name: Dialyzer
+        if: matrix.lint
+        run: mix dialyzer
