@@ -59,7 +59,10 @@ defmodule Flier.MixProject do
     [
       name: "flier",
       # These are the default files included in the package
-      files: ~w(lib native .formatter.exs mix.exs README* LICENSE* checksum-*.exs),
+      # The root Cargo.toml (workspace) and Cargo.lock are needed to build
+      # the NIFs from source.
+      files:
+        ~w(lib native Cargo.toml Cargo.lock .formatter.exs mix.exs README* LICENSE* checksum-*.exs),
       licenses: ["MIT"],
       links: %{"GitHub" => @url}
     ]
