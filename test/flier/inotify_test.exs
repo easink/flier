@@ -399,6 +399,12 @@ defmodule Flier.InotifyTest do
       assert :create in masks
     end
 
+    test "validates the mask when called, not when enumerated", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/:close_writ/, fn ->
+        Flier.Inotify.stream(tmp_dir, [:close_writ])
+      end
+    end
+
     test "raises File.Error when the path cannot be watched" do
       non_existent = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 

@@ -163,6 +163,42 @@ defmodule Flier.EntriesTest do
     end
   end
 
+  describe "Flier.Entries.stream/2 option validation" do
+    test "raises on unknown options without enumerating", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/unknown keys \[:recursve\]/, fn ->
+        Flier.Entries.stream(tmp_dir, recursve: true)
+      end
+    end
+
+    test "raises on invalid option values", %{tmp_dir: tmp_dir} do
+      for {opt, value} <- [
+            recursive: :yes,
+            max_depth: -1,
+            max_depth: 1.5,
+            follow_symlinks: nil,
+            on_error: :ignore
+          ] do
+        assert_raise ArgumentError, ~r/#{opt}/, fn ->
+          Flier.Entries.stream(tmp_dir, [{opt, value}])
+        end
+      end
+    end
+
+    test "accepts all valid options", %{tmp_dir: tmp_dir} do
+      assert [] =
+               tmp_dir
+               |> Flier.Entries.stream(
+                 recursive: true,
+                 max_depth: 0,
+                 follow_symlinks: true,
+                 on_error: :raise
+               )
+               |> Enum.to_list()
+
+      assert [] = tmp_dir |> Flier.Entries.stream(max_depth: :infinity) |> Enum.to_list()
+    end
+  end
+
   describe "Flier.Entries.Entry struct" do
     test "has expected fields", %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "test.txt"), "content")

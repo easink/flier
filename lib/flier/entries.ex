@@ -76,6 +76,9 @@ defmodule Flier.Entries do
     continues the walk; `:raise` raises a `File.Error`. Only relevant when
     `recursive: true`. Failing to open or read the root `path` always raises.
 
+  Unknown options or invalid option values raise an `ArgumentError` when
+  `stream/2` is called.
+
   ## Returns
 
   A lazy `Stream` of `%Flier.Entries.Entry{}` structs.
@@ -115,13 +118,11 @@ defmodule Flier.Entries do
   """
   @spec stream(path :: String.t(), opts :: keyword()) :: Enumerable.t()
   def stream(path, opts \\ []) do
+    opts = validate_opts!(opts)
+
     walk =
-      if Keyword.get(opts, :recursive, false) do
-        %{
-          max_depth: Keyword.get(opts, :max_depth, :infinity),
-          follow_symlinks: Keyword.get(opts, :follow_symlinks, false),
-          on_error: Keyword.get(opts, :on_error, :skip)
-        }
+      if opts[:recursive] do
+        Map.new(Keyword.delete(opts, :recursive))
       else
         # A flat listing is a walk that never descends.
         %{max_depth: 0, follow_symlinks: false, on_error: :raise}
@@ -133,6 +134,23 @@ defmodule Flier.Entries do
       &close_all/1
     )
   end
+
+  @default_opts [recursive: false, max_depth: :infinity, follow_symlinks: false, on_error: :skip]
+
+  defp validate_opts!(opts) do
+    opts = Keyword.validate!(opts, @default_opts)
+
+    for {key, value} <- opts, not valid_opt?(key, value) do
+      raise ArgumentError, "invalid value for #{inspect(key)} option: #{inspect(value)}"
+    end
+
+    opts
+  end
+
+  defp valid_opt?(:recursive, value), do: is_boolean(value)
+  defp valid_opt?(:follow_symlinks, value), do: is_boolean(value)
+  defp valid_opt?(:max_depth, value), do: value == :infinity or (is_integer(value) and value >= 0)
+  defp valid_opt?(:on_error, value), do: value in [:skip, :raise]
 
   # The state is a depth-first stack of frames:
   #   {:pending, dir, rel_path, depth}       — directory not yet opened
