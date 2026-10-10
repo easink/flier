@@ -107,9 +107,14 @@ defmodule Flier.Inotify do
   @doc """
   Starts an inotify watcher on `path` for the given event `mask`.
 
-  Spawns a background OS thread that reads inotify events and sends
-  `{:inotify_event, ref, %Flier.Inotify.Event{}}` messages to `pid` as they
-  occur, where `ref` is the returned watcher's `:ref`.
+  Sends `{:inotify_event, ref, %Flier.Inotify.Event{}}` messages to `pid` as
+  events occur, where `ref` is the returned watcher's `:ref`.
+
+  All watchers share a single inotify instance, read by one background OS
+  thread, so they count once against the `fs.inotify.max_user_instances`
+  limit. Watchers on the same directory also share its kernel watch, and
+  each is sent only the events it subscribed to. The instance is closed when
+  the last watcher stops.
 
   If reading events fails, the watcher sends a final
   `{:inotify_error, ref, reason}` message, where `reason` is a POSIX error
@@ -174,11 +179,13 @@ defmodule Flier.Inotify do
   @doc """
   Stops a running inotify watcher.
 
-  Signals the background OS thread to stop, waits for it to terminate, and
-  releases the underlying inotify file descriptor.
+  No events are sent to the watcher's process once this returns, and the
+  kernel watch is removed if no other watcher uses it. Stopping a watcher
+  again has no effect.
 
   The watcher is also stopped automatically when it is garbage-collected by
-  the BEAM. Events already delivered to the mailbox are not removed.
+  the BEAM, so keep the `Flier.Inotify.Watcher` for as long as events are
+  wanted. Events already delivered to the mailbox are not removed.
 
   ## Parameters
 
@@ -280,8 +287,8 @@ defmodule Flier.Inotify do
     end
   end
 
-  # The watcher thread is joined by stop_watcher/1, so no messages for `ref`
-  # can arrive after this runs.
+  # No messages for `ref` are sent once stop_watcher/1 returns, so none can
+  # arrive after this runs.
   defp flush_events(ref) do
     receive do
       {:inotify_event, ^ref, _event} -> flush_events(ref)

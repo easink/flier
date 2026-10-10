@@ -1,10 +1,14 @@
 use flier_common::errno_atom;
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask, Watches};
 use rustler::env::SavedTerm;
-use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
+use rustler::{
+    Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc, Term,
+};
+use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 
 rustler::atoms! {
@@ -23,35 +27,48 @@ struct Event<'a> {
     cookie: u32,
 }
 
-/// Handle to the background reader thread.
+/// A watcher: a process subscribed to the events of one kernel watch.
+struct Subscriber {
+    id: u64,
+    pid: LocalPid,
+    /// The watcher's ref, kept in an env of its own. It cannot be the
+    /// resource itself, as holding that would keep the resource alive.
+    tag: (OwnedEnv, SavedTerm),
+    /// The events the watcher subscribed to.
+    events: EventMask,
+}
+
+/// The inotify instance shared by all watchers, read by a single thread.
 ///
-/// The thread blocks in `read(2)` on the inotify fd. To stop it we set
-/// `running` to false and remove the watch: the kernel then queues an
-/// `IN_IGNORED` event, which wakes the thread immediately so it can observe
-/// the flag and exit. This keeps `stop_watcher/1` (and `Drop`) fast instead
-/// of waiting for a poll timeout.
-struct WatcherResourceInner {
-    running: Arc<AtomicBool>,
+/// Watchers on the same inode share its kernel watch: it is added with
+/// `IN_MASK_ADD`, so its mask is the union of theirs, and each watcher is
+/// only sent the events it subscribed to. A kernel watch exists exactly as
+/// long as it has subscribers; removing the last one removes the watch.
+///
+/// The hub lives while it has watches. Removing a watch makes the kernel
+/// queue `IN_IGNORED`, which wakes the reader thread; when it finds no
+/// subscribers left it drops the hub, closing the instance, and exits. The
+/// next watcher then starts a new one.
+///
+/// Events are only sent while holding the hub lock, so once a watcher has
+/// been unsubscribed no further events reach it.
+struct Hub {
     watches: Watches,
-    wd: WatchDescriptor,
-    watcher: Option<thread::JoinHandle<()>>,
+    subscribers: HashMap<WatchDescriptor, Vec<Subscriber>>,
 }
 
-impl WatcherResourceInner {
-    fn stop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(watcher) = self.watcher.take() {
-            // Fails with EINVAL if the watch is already gone (e.g. the watched
-            // directory was deleted); the thread has then exited on its own
-            // after receiving IN_IGNORED.
-            let _ = self.watches.remove(self.wd.clone());
-            let _ = watcher.join();
-        }
-    }
+static HUB: Mutex<Option<Hub>> = Mutex::new(None);
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Lock the hub, even if a panic poisoned the lock.
+fn lock_hub() -> MutexGuard<'static, Option<Hub>> {
+    HUB.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// A watcher's handle on its subscription.
 struct WatcherResource {
-    inner: Mutex<WatcherResourceInner>,
+    id: u64,
+    wd: WatchDescriptor,
 }
 
 #[rustler::resource_impl]
@@ -59,14 +76,9 @@ impl Resource for WatcherResource {}
 
 impl Drop for WatcherResource {
     fn drop(&mut self) {
-        // Guarantee the background thread is stopped and joined when the
-        // resource is garbage-collected, even if the caller never invoked
-        // `stop_watcher/1`. Proceed even if the lock is poisoned.
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        inner.stop();
+        // Stop the watcher when the resource is garbage-collected, even if
+        // the caller never invoked `stop_watcher/1`.
+        unsubscribe(self.id, &self.wd);
     }
 }
 
@@ -75,119 +87,221 @@ impl Drop for WatcherResource {
 #[rustler::nif(schedule = "DirtyIo")]
 fn start_watcher(
     env: Env,
-    path: rustler::Binary,
+    path: Binary,
     event_list: Vec<Atom>,
     pid: LocalPid,
-    tag: rustler::Term,
+    tag: Term,
 ) -> Result<ResourceArc<WatcherResource>, Atom> {
-    let inotify = Inotify::init().map_err(|e| errno_atom(env, &e))?;
-    let mut watches = inotify.watches();
     let event_names: Vec<String> = event_list
         .iter()
         .filter_map(|atom| atom.to_term(env).atom_to_string().ok())
         .collect();
-    let wd = watches
-        .add(
-            std::ffi::OsStr::from_bytes(path.as_slice()),
-            build_watch_mask(event_names.iter().map(String::as_str)),
-        )
-        .map_err(|e| errno_atom(env, &e))?;
+    let mask = build_watch_mask(event_names.iter().map(String::as_str));
+    let path = OsStr::from_bytes(path.as_slice());
 
-    // The tag is copied into an env owned by the thread; it cannot be the
-    // resource itself, as the thread holding it would keep the resource alive.
+    let mut guard = lock_hub();
+    let (hub, wd) = match guard.as_mut() {
+        Some(hub) => {
+            let wd = hub
+                .watches
+                .add(path, mask | WatchMask::MASK_ADD)
+                .map_err(|e| errno_atom(env, &e))?;
+            (hub, wd)
+        }
+        None => {
+            let (hub, wd) = start_hub(path, mask).map_err(|e| errno_atom(env, &e))?;
+            (guard.insert(hub), wd)
+        }
+    };
+
     let tag_env = OwnedEnv::new();
     let tag = tag_env.save(tag);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
-    let running = Arc::new(AtomicBool::new(true));
-    let thread_running = running.clone();
-    let watcher = thread::spawn(move || read_loop(inotify, pid, (tag_env, tag), thread_running));
+    hub.subscribers
+        .entry(wd.clone())
+        .or_default()
+        .push(Subscriber {
+            id,
+            pid,
+            tag: (tag_env, tag),
+            events: EventMask::from_bits_truncate(mask.bits()),
+        });
+    drop(guard);
 
-    let resource = ResourceArc::new(WatcherResource {
-        inner: Mutex::new(WatcherResourceInner {
-            running,
-            watches,
-            wd,
-            watcher: Some(watcher),
-        }),
-    });
-
-    Ok(resource)
+    Ok(ResourceArc::new(WatcherResource { id, wd }))
 }
 
-/// Blocking read loop run on the watcher thread. Exits when stopped, when
-/// the recipient process is gone, on read errors (after sending
-/// `{:inotify_error, tag, errno}`), or once the watch has been removed by the
-/// kernel (`IN_IGNORED`) since no further events can arrive.
-fn read_loop(
-    mut inotify: Inotify,
-    pid: LocalPid,
-    (tag_env, tag): (OwnedEnv, SavedTerm),
-    running: Arc<AtomicBool>,
-) {
-    let mut owned_env = OwnedEnv::new();
-    let mut buffer = [0u8; 4096];
+/// Create the inotify instance with a first watch on `path`, and its reader
+/// thread. The watch is added first so that no thread is started for a path
+/// that cannot be watched: the thread only exits once a watch is removed.
+fn start_hub(path: &OsStr, mask: WatchMask) -> std::io::Result<(Hub, WatchDescriptor)> {
+    let inotify = Inotify::init()?;
+    let mut watches = inotify.watches();
+    let wd = watches.add(path, mask)?;
 
-    while running.load(Ordering::SeqCst) {
-        let events = match inotify.read_events_blocking(&mut buffer) {
-            Ok(events) => events,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                // Tell the recipient no further events will arrive, so it
-                // does not wait forever.
-                if running.load(Ordering::SeqCst) {
-                    let _ = owned_env.send_and_clear(&pid, |env| {
-                        let tag = tag_env.run(|tag_env| tag.load(tag_env).in_env(env));
-                        (inotify_error(), tag, errno_atom(env, &e)).encode(env)
-                    });
-                }
-                return;
+    thread::Builder::new()
+        .name("flier_inotify".into())
+        .spawn(move || read_loop(inotify))?;
+
+    let hub = Hub {
+        watches,
+        subscribers: HashMap::new(),
+    };
+    Ok((hub, wd))
+}
+
+/// Stop watcher via resource handle. Idempotent. Runs on a dirty scheduler
+/// as it takes the hub lock and removes the kernel watch.
+#[rustler::nif(schedule = "DirtyIo")]
+fn stop_watcher(resource: ResourceArc<WatcherResource>) -> Atom {
+    unsubscribe(resource.id, &resource.wd);
+    stopped()
+}
+
+/// Remove a subscriber, and its kernel watch if it was the last one on it.
+fn unsubscribe(id: u64, wd: &WatchDescriptor) {
+    let mut guard = lock_hub();
+    let Some(hub) = guard.as_mut() else {
+        return;
+    };
+    let Some(subscribers) = hub.subscribers.get_mut(wd) else {
+        return;
+    };
+
+    subscribers.retain(|sub| sub.id != id);
+    if subscribers.is_empty() {
+        hub.remove_watch(wd);
+    }
+}
+
+impl Hub {
+    /// Forget a watch and remove it from the kernel. Removal fails with
+    /// EINVAL if the kernel already dropped the watch, which is fine.
+    fn remove_watch(&mut self, wd: &WatchDescriptor) {
+        self.subscribers.remove(wd);
+        let _ = self.watches.remove(wd.clone());
+    }
+
+    /// Send an event to the subscribers that want it.
+    fn dispatch(&mut self, env: &mut OwnedEnv, event: &inotify::Event<&OsStr>) {
+        if event.mask.contains(EventMask::Q_OVERFLOW) {
+            // Not tied to a watch: every watcher may have missed events.
+            let wds: Vec<WatchDescriptor> = self.subscribers.keys().cloned().collect();
+            for wd in &wds {
+                self.deliver(env, wd, event);
             }
+        } else {
+            self.deliver(env, &event.wd, event);
+        }
+
+        if event.mask.contains(EventMask::IGNORED) {
+            // The kernel removed the watch; no further events can arrive.
+            self.subscribers.remove(&event.wd);
+        }
+    }
+
+    /// Send `event` to the subscribers of `wd` that want it, dropping those
+    /// whose process is gone.
+    fn deliver(
+        &mut self,
+        env: &mut OwnedEnv,
+        wd: &WatchDescriptor,
+        event: &inotify::Event<&OsStr>,
+    ) {
+        let Some(subscribers) = self.subscribers.get_mut(wd) else {
+            return;
         };
 
-        for event in events {
-            if !running.load(Ordering::SeqCst) {
-                return;
-            }
+        let names = mask_names(event.mask);
+        let name = event.name.map(OsStr::as_bytes).unwrap_or_default();
 
-            // Preserve the raw bytes of the filename: Linux filenames are
-            // arbitrary byte sequences, so they are sent as an Erlang binary
-            // rather than a lossily converted string.
-            let name: &[u8] = event.name.map(|n| n.as_bytes()).unwrap_or_default();
-            let names = mask_names(event.mask);
+        subscribers.retain(|sub| {
+            !wants(sub.events, event.mask)
+                || env
+                    .send_and_clear(&sub.pid, |env| {
+                        let mut bin = NewBinary::new(env, name.len());
+                        bin.as_mut_slice().copy_from_slice(name);
+                        let masks: Vec<Atom> = names
+                            .iter()
+                            .map(|name| {
+                                Atom::from_str(env, name).expect("event names are valid atoms")
+                            })
+                            .collect();
+                        let msg = Event {
+                            name: bin.into(),
+                            masks,
+                            cookie: event.cookie,
+                        };
+                        (inotify_event(), sub.tag(env), msg).encode(env)
+                    })
+                    .is_ok()
+        });
 
-            let sent = owned_env.send_and_clear(&pid, |env| {
-                let mut bin = NewBinary::new(env, name.len());
-                bin.as_mut_slice().copy_from_slice(name);
-                let tag = tag_env.run(|tag_env| tag.load(tag_env).in_env(env));
-                let masks: Vec<Atom> = names
-                    .iter()
-                    .map(|name| Atom::from_str(env, name).expect("event names are valid atoms"))
-                    .collect();
-                let msg = Event {
-                    name: bin.into(),
-                    masks,
-                    cookie: event.cookie,
-                };
-                (inotify_event(), tag, msg).encode(env)
+        if subscribers.is_empty() {
+            self.remove_watch(wd);
+        }
+    }
+
+    /// Tell every subscriber that no further events will arrive, so none
+    /// waits forever.
+    fn broadcast_error(&self, env: &mut OwnedEnv, err: &std::io::Error) {
+        for sub in self.subscribers.values().flatten() {
+            let _ = env.send_and_clear(&sub.pid, |env| {
+                (inotify_error(), sub.tag(env), errno_atom(env, err)).encode(env)
             });
-
-            if sent.is_err() || event.mask.contains(EventMask::IGNORED) {
-                return;
-            }
         }
     }
 }
 
-/// Stop watcher via resource handle. Runs on a dirty scheduler as it joins
-/// the reader thread, which must first wake up from its blocking read.
-#[rustler::nif(schedule = "DirtyIo")]
-fn stop_watcher(resource: ResourceArc<WatcherResource>) -> Atom {
-    let mut inner = match resource.inner.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    inner.stop();
-    stopped()
+impl Subscriber {
+    /// The watcher's ref, copied into `env`.
+    fn tag<'a>(&self, env: Env<'a>) -> Term<'a> {
+        let (tag_env, tag) = &self.tag;
+        tag_env.run(|tag_env| tag.load(tag_env).in_env(env))
+    }
+}
+
+/// Whether a watcher subscribed to `subscribed` wants an event with `mask`.
+/// The flags the kernel reports unasked concern every watcher.
+fn wants(subscribed: EventMask, mask: EventMask) -> bool {
+    let unasked = EventMask::IGNORED | EventMask::Q_OVERFLOW | EventMask::UNMOUNT;
+    mask.intersects(subscribed | unasked)
+}
+
+/// Blocking read loop run on the reader thread. Exits once no watchers are
+/// left, or on a read error after sending `{:inotify_error, tag, errno}` to
+/// every watcher; either way the hub is dropped.
+fn read_loop(mut inotify: Inotify) {
+    let mut env = OwnedEnv::new();
+    let mut buffer = [0u8; 4096];
+
+    loop {
+        let events = match inotify.read_events_blocking(&mut buffer) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            events => events,
+        };
+
+        let mut guard = lock_hub();
+        let Some(hub) = guard.as_mut() else {
+            return;
+        };
+
+        match events {
+            Ok(events) => {
+                for event in events {
+                    hub.dispatch(&mut env, &event);
+                }
+                if !hub.subscribers.is_empty() {
+                    continue;
+                }
+            }
+            Err(e) => hub.broadcast_error(&mut env, &e),
+        }
+
+        *guard = None;
+        return;
+    }
 }
 
 rustler::init!("Elixir.Flier.Inotify.Native");
@@ -287,5 +401,28 @@ mod tests {
             build_watch_mask(["create", "close_write", "isdir", "bogus"]),
             WatchMask::CREATE | WatchMask::CLOSE_WRITE
         );
+    }
+
+    #[test]
+    fn watchers_want_only_their_events() {
+        assert!(wants(
+            EventMask::CREATE,
+            EventMask::CREATE | EventMask::ISDIR
+        ));
+        assert!(!wants(
+            EventMask::CREATE,
+            EventMask::DELETE | EventMask::ISDIR
+        ));
+    }
+
+    #[test]
+    fn watchers_want_unasked_flags() {
+        for flag in [
+            EventMask::IGNORED,
+            EventMask::Q_OVERFLOW,
+            EventMask::UNMOUNT,
+        ] {
+            assert!(wants(EventMask::CREATE, flag));
+        }
     }
 }

@@ -584,6 +584,112 @@ defmodule Flier.InotifyTest do
     end
   end
 
+  describe "shared inotify instance" do
+    test "many watchers share one inotify instance and reader thread", %{tmp_dir: tmp_dir} do
+      watchers =
+        for i <- 1..20 do
+          dir = Path.join(tmp_dir, "d#{i}")
+          File.mkdir!(dir)
+          {:ok, watcher} = Flier.Inotify.start_watcher(dir, [:create])
+          watcher
+        end
+
+      assert inotify_fd_count() == 1
+      assert reader_thread_count() == 1
+
+      Enum.each(watchers, &Flier.Inotify.stop_watcher/1)
+    end
+
+    test "the instance is released once the last watcher stops", %{tmp_dir: tmp_dir} do
+      {:ok, w1} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      {:ok, w2} = Flier.Inotify.start_watcher(tmp_dir, [:delete])
+      Flier.Inotify.stop_watcher(w1)
+      Flier.Inotify.stop_watcher(w2)
+
+      assert_eventually(fn -> inotify_fd_count() == 0 and reader_thread_count() == 0 end)
+
+      # A new watcher starts a fresh instance.
+      {:ok, %{ref: ref} = w3} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      File.write!(Path.join(tmp_dir, "again.txt"), "x")
+      assert_receive {:inotify_event, ^ref, %Event{name: "again.txt"}}, 1000
+      Flier.Inotify.stop_watcher(w3)
+    end
+
+    test "watchers on the same directory only get their own events", %{tmp_dir: tmp_dir} do
+      {:ok, %{ref: creates} = w1} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      {:ok, %{ref: deletes} = w2} = Flier.Inotify.start_watcher(tmp_dir, [:delete])
+
+      file = Path.join(tmp_dir, "shared.txt")
+      File.write!(file, "x")
+      File.rm!(file)
+
+      assert_receive {:inotify_event, ^creates, %Event{name: "shared.txt", masks: [:create]}},
+                     1000
+
+      assert_receive {:inotify_event, ^deletes, %Event{name: "shared.txt", masks: [:delete]}},
+                     1000
+
+      refute_receive {:inotify_event, _, %Event{}}, 100
+
+      Flier.Inotify.stop_watcher(w1)
+      Flier.Inotify.stop_watcher(w2)
+    end
+
+    test "stopping one watcher on a directory keeps the other running", %{tmp_dir: tmp_dir} do
+      {:ok, w1} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      {:ok, %{ref: ref} = w2} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      Flier.Inotify.stop_watcher(w1)
+
+      File.write!(Path.join(tmp_dir, "still.txt"), "x")
+
+      assert_receive {:inotify_event, ^ref, %Event{name: "still.txt"}}, 1000
+      refute_receive {:inotify_event, _, %Event{}}, 100
+
+      Flier.Inotify.stop_watcher(w2)
+    end
+
+    test "every watcher on a removed directory gets :ignored", %{tmp_dir: tmp_dir} do
+      {:ok, %{ref: ref1} = w1} = Flier.Inotify.start_watcher(tmp_dir, [:create])
+      {:ok, %{ref: ref2} = w2} = Flier.Inotify.start_watcher(tmp_dir, [:delete])
+
+      File.rm_rf!(tmp_dir)
+
+      assert_receive {:inotify_event, ^ref1, %Event{masks: [:ignored]}}, 1000
+      assert_receive {:inotify_event, ^ref2, %Event{masks: [:ignored]}}, 1000
+
+      Flier.Inotify.stop_watcher(w1)
+      Flier.Inotify.stop_watcher(w2)
+    end
+  end
+
+  # Open inotify file descriptors in this OS process.
+  defp inotify_fd_count do
+    "/proc/self/fd"
+    |> File.ls!()
+    |> Enum.count(&(File.read_link("/proc/self/fd/" <> &1) == {:ok, "anon_inode:inotify"}))
+  end
+
+  # Running Flier reader threads in this OS process.
+  defp reader_thread_count do
+    "/proc/self/task/*/comm"
+    |> Path.wildcard()
+    |> Enum.count(&(File.read(&1) == {:ok, "flier_inotify\n"}))
+  end
+
+  defp assert_eventually(fun, attempts \\ 100) do
+    cond do
+      fun.() ->
+        :ok
+
+      attempts > 0 ->
+        Process.sleep(10)
+        assert_eventually(fun, attempts - 1)
+
+      true ->
+        flunk("condition never became true")
+    end
+  end
+
   describe "custom pid" do
     test "sends events to specified pid", %{tmp_dir: tmp_dir} do
       parent = self()
@@ -702,7 +808,7 @@ defmodule Flier.InotifyTest do
       {:ok, ref} = Flier.Inotify.start_watcher(tmp_dir, [:create], recipient)
 
       Process.exit(recipient, :kill)
-      # Give the Rust thread a chance to detect send failure on the next event.
+      # Give the reader thread a chance to detect send failure on the next event.
       Process.sleep(50)
       File.write!(Path.join(tmp_dir, "ghost.txt"), "x")
       Process.sleep(150)
@@ -784,9 +890,9 @@ defmodule Flier.InotifyTest do
       Process.exit(pid, :kill)
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1000
 
-      # If the underlying NIF thread had leaked, it would still be polling and
-      # could send {:inotify_event, _, ...} to the now-dead pid (harmless) — but
-      # critically, the test process must never see those events.
+      # If the watcher had leaked, it could still send {:inotify_event, _, ...}
+      # to the now-dead pid (harmless) — but critically, the test process must
+      # never see those events.
       File.write!(Path.join(tmp_dir, "after_exit.txt"), "x")
       refute_receive {:inotify_event, _, %Event{}}, 200
     end
@@ -848,7 +954,7 @@ defmodule Flier.InotifyTest do
     test "watcher is cleaned up when the resource is garbage-collected", %{tmp_dir: tmp_dir} do
       # Start a watcher in a child function so the ResourceArc has no
       # remaining Elixir-side references after the call returns. The Rust
-      # `Drop` impl on WatcherResource must then stop the polling thread.
+      # `Drop` impl on WatcherResource must then unsubscribe the watcher.
       start_and_drop = fn ->
         {:ok, _ref} = Flier.Inotify.start_watcher(tmp_dir, [:create])
         :ok
@@ -861,8 +967,8 @@ defmodule Flier.InotifyTest do
       Process.sleep(50)
       :erlang.garbage_collect(self())
 
-      # If the thread is still running, creating a file would still produce
-      # an event (the thread sends to the original caller pid, which is this
+      # If the watcher were still subscribed, creating a file would still
+      # produce an event (sent to the original caller pid, which is this
       # test process). After GC + Drop, no event should arrive.
       test_file = Path.join(tmp_dir, "after_gc.txt")
       File.write!(test_file, "should not trigger event")
