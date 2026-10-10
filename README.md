@@ -17,7 +17,7 @@ needed.
 ``` elixir
 def deps do
   [
-    {:flier, "~> 0.5.0"}
+    {:flier, "~> 0.6.0"}
   ]
 end
 ```
