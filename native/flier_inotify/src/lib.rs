@@ -178,8 +178,9 @@ fn read_loop(
     }
 }
 
-/// Stop watcher via resource handle
-#[rustler::nif]
+/// Stop watcher via resource handle. Runs on a dirty scheduler as it joins
+/// the reader thread, which must first wake up from its blocking read.
+#[rustler::nif(schedule = "DirtyIo")]
 fn stop_watcher(resource: ResourceArc<WatcherResource>) -> Atom {
     let mut inner = match resource.inner.lock() {
         Ok(g) => g,
