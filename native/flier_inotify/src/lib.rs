@@ -10,6 +10,7 @@ use std::thread;
 rustler::atoms! {
     stopped,
     inotify_event,
+    inotify_error,
 }
 
 /// Handle to the background reader thread.
@@ -104,8 +105,9 @@ fn start_watcher(
 }
 
 /// Blocking read loop run on the watcher thread. Exits when stopped, when
-/// the recipient process is gone, on read errors, or once the watch has been
-/// removed by the kernel (`IN_IGNORED`) since no further events can arrive.
+/// the recipient process is gone, on read errors (after sending
+/// `{:inotify_error, tag, errno}`), or once the watch has been removed by the
+/// kernel (`IN_IGNORED`) since no further events can arrive.
 fn read_loop(
     mut inotify: Inotify,
     pid: LocalPid,
@@ -119,7 +121,17 @@ fn read_loop(
         let events = match inotify.read_events_blocking(&mut buffer) {
             Ok(events) => events,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return,
+            Err(e) => {
+                // Tell the recipient no further events will arrive, so it
+                // does not wait forever.
+                if running.load(Ordering::SeqCst) {
+                    let _ = owned_env.send_and_clear(&pid, |env| {
+                        let tag = tag_env.run(|tag_env| tag.load(tag_env).in_env(env));
+                        (inotify_error(), tag, errno_atom(env, &e)).encode(env)
+                    });
+                }
+                return;
+            }
         };
 
         for event in events {

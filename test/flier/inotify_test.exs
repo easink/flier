@@ -345,6 +345,21 @@ defmodule Flier.InotifyTest do
     dir
   end
 
+  # Wait until `pid` is blocked in a receive.
+  defp wait_until_waiting(pid, attempts \\ 100) do
+    case Process.info(pid, :status) do
+      {:status, :waiting} ->
+        :ok
+
+      _ when attempts > 0 ->
+        Process.sleep(10)
+        wait_until_waiting(pid, attempts - 1)
+
+      other ->
+        flunk("process never blocked: #{inspect(other)}")
+    end
+  end
+
   # Collect all inotify events arriving within `timeout_ms` of silence.
   defp collect_events(timeout_ms), do: collect_events_loop([], timeout_ms)
 
@@ -414,6 +429,33 @@ defmodule Flier.InotifyTest do
         end
 
       assert %File.Error{reason: :enoent, path: ^non_existent} = error
+    end
+
+    test "raises File.Error when the watcher reports an error", %{tmp_dir: tmp_dir} do
+      parent = self()
+
+      pid =
+        spawn(fn ->
+          result =
+            try do
+              tmp_dir |> Flier.Inotify.stream([:create]) |> Enum.to_list()
+            rescue
+              error in File.Error -> error
+            end
+
+          send(parent, {:result, result})
+        end)
+
+      # Learn the stream's watcher ref from the first event it receives, then
+      # deliver the error a failing watcher would send.
+      :erlang.trace(pid, true, [:receive])
+      wait_until_waiting(pid)
+      File.write!(Path.join(tmp_dir, "a.txt"), "x")
+      assert_receive {:trace, ^pid, :receive, {:inotify_event, ref, "a.txt", _}}, 1000
+      send(pid, {:inotify_error, ref, :eio})
+
+      assert_receive {:result, %File.Error{reason: :eio, path: ^tmp_dir} = error}, 1000
+      assert Exception.message(error) =~ "could not read events from directory"
     end
 
     test "emits :ignored and halts when the watched directory is removed",

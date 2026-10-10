@@ -107,6 +107,10 @@ defmodule Flier.Inotify do
   `{:inotify_event, ref, filename, masks}` messages to `pid` as they occur,
   where `ref` is the returned watcher's `:ref`.
 
+  If reading events fails, the watcher sends a final
+  `{:inotify_error, ref, reason}` message, where `reason` is a POSIX error
+  atom, and delivers no further events.
+
   ## Parameters
 
   - `path` — Absolute path to the directory to watch.
@@ -218,7 +222,8 @@ defmodule Flier.Inotify do
 
   Raises an `ArgumentError` immediately for an invalid `mask`, and a
   `File.Error` when enumeration starts if `path` cannot be watched; its
-  `:reason` is the error `start_watcher/3` would return.
+  `:reason` is the error `start_watcher/3` would return. A `File.Error` is
+  also raised during enumeration if the watcher fails to read events.
 
   ## Examples
 
@@ -250,7 +255,7 @@ defmodule Flier.Inotify do
             raise File.Error, reason: reason, action: "watch directory", path: path
         end
       end,
-      &next_event/1,
+      &next_event(&1, path),
       fn {%Watcher{ref: ref} = watcher, _status} ->
         stop_watcher(watcher)
         flush_events(ref)
@@ -258,22 +263,26 @@ defmodule Flier.Inotify do
     )
   end
 
-  defp next_event({_watcher, :done} = state), do: {:halt, state}
+  defp next_event({_watcher, :done} = state, _path), do: {:halt, state}
 
-  defp next_event({%Watcher{ref: ref} = watcher, :running}) do
+  defp next_event({%Watcher{ref: ref} = watcher, :running}, path) do
     receive do
       {:inotify_event, ^ref, file, masks} ->
         # :ignored means the watch is gone; no further events can follow.
         status = if :ignored in masks, do: :done, else: :running
         {[{file, masks}], {watcher, status}}
+
+      {:inotify_error, ^ref, reason} ->
+        raise File.Error, reason: reason, action: "read events from directory", path: path
     end
   end
 
-  # The watcher thread is joined by stop_watcher/1, so no events for `ref`
+  # The watcher thread is joined by stop_watcher/1, so no messages for `ref`
   # can arrive after this runs.
   defp flush_events(ref) do
     receive do
       {:inotify_event, ^ref, _file, _masks} -> flush_events(ref)
+      {:inotify_error, ^ref, _reason} -> flush_events(ref)
     after
       0 -> :ok
     end
