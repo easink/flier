@@ -10,8 +10,9 @@ defmodule Flier.Entries do
   - `:path` — Relative path from the walk root to the directory containing the
     entry. Always `"."` in flat (non-recursive) mode.
 
-  The stream reads entries on demand, so arbitrarily large directories can be
-  processed without loading all entries into memory at once.
+  The stream reads entries on demand in batches of a few hundred, so
+  arbitrarily large directories can be processed without loading all entries
+  into memory at once.
 
   > #### Filename encoding {: .info}
   >
@@ -152,9 +153,15 @@ defmodule Flier.Entries do
   defp valid_opt?(:max_depth, value), do: value == :infinity or (is_integer(value) and value >= 0)
   defp valid_opt?(:on_error, value), do: value in [:skip, :raise]
 
+  # Entries fetched per NIF call; amortises the cost of each dirty NIF call.
+  @batch_size 256
+
   # The state is a depth-first stack of frames:
   #   {:pending, dir, rel_path, depth}       — directory not yet opened
-  #   {:reading, ref, dir, rel_path, depth}  — open handle, read one entry per step
+  #   {:reading, ref, dir, rel_path, depth}  — open handle, read a batch per step
+  #
+  # The subdirectories found in a batch are pushed above their parent, so they
+  # are walked before the parent's next batch is read.
   defp next([], _walk), do: {:halt, []}
 
   defp next([{:pending, dir, rel_path, depth} | rest], walk) do
@@ -172,22 +179,18 @@ defmodule Flier.Entries do
   end
 
   defp next([{:reading, ref, dir, rel_path, depth} = frame | rest], walk) do
-    case Flier.Entries.Native.readdir(ref) do
-      {:ok, entry} ->
-        stack = [frame | rest]
-
-        stack =
-          if depth_allowed?(depth, walk.max_depth) and
-               descend?(entry.type, dir, entry.name, walk.follow_symlinks) do
-            [
-              {:pending, Path.join(dir, entry.name), sub_path(rel_path, entry.name), depth + 1}
-              | stack
-            ]
+    case Flier.Entries.Native.readdir(ref, @batch_size, rel_path) do
+      {:ok, entries} ->
+        subdirs =
+          if depth_allowed?(depth, walk.max_depth) do
+            for %{name: name, type: type} <- entries,
+                descend?(type, dir, name, walk.follow_symlinks),
+                do: pending_subdir(dir, rel_path, name, depth)
           else
-            stack
+            []
           end
 
-        {[%{entry | path: rel_path}], stack}
+        {entries, subdirs ++ [frame | rest]}
 
       {:error, :end_of_directory} ->
         Flier.Entries.Native.closedir(ref)
@@ -214,6 +217,9 @@ defmodule Flier.Entries do
   defp descend?(:directory, _dir, _name, _follow_symlinks), do: true
   defp descend?(:symlink, dir, name, true), do: File.dir?(Path.join(dir, name))
   defp descend?(_type, _dir, _name, _follow_symlinks), do: false
+
+  defp pending_subdir(dir, rel_path, name, depth),
+    do: {:pending, Path.join(dir, name), sub_path(rel_path, name), depth + 1}
 
   defp sub_path(".", name), do: name
   defp sub_path(rel_path, name), do: Path.join(rel_path, name)

@@ -43,7 +43,18 @@ defmodule Flier.EntriesTest do
     end
   end
 
-  describe "Flier.Entries.Native.readdir/1" do
+  describe "Flier.Entries.Native.readdir/2" do
+    test "returns at most max entries per call", %{tmp_dir: tmp_dir} do
+      for i <- 1..5, do: File.write!(Path.join(tmp_dir, "f#{i}"), "x")
+      {:ok, ref} = Flier.Entries.Native.opendir(tmp_dir)
+
+      assert {:ok, [_, _]} = Flier.Entries.Native.readdir(ref, 2)
+      assert {:ok, [_, _]} = Flier.Entries.Native.readdir(ref, 2)
+      assert {:ok, [_]} = Flier.Entries.Native.readdir(ref, 2)
+      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref, 2)
+      Flier.Entries.Native.closedir(ref)
+    end
+
     test "reads entries from directory", %{tmp_dir: tmp_dir} do
       # Create some files and directories
       File.write!(Path.join(tmp_dir, "file1.txt"), "content")
@@ -78,14 +89,14 @@ defmodule Flier.EntriesTest do
     test "returns {:error, :end_of_directory} when exhausted", %{tmp_dir: tmp_dir} do
       # Empty directory
       {:ok, ref} = Flier.Entries.Native.opendir(tmp_dir)
-      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref)
+      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref, 1)
       Flier.Entries.Native.closedir(ref)
     end
 
     test "returns {:error, :already_closed} after close", %{tmp_dir: tmp_dir} do
       {:ok, ref} = Flier.Entries.Native.opendir(tmp_dir)
       Flier.Entries.Native.closedir(ref)
-      assert {:error, :already_closed} = Flier.Entries.Native.readdir(ref)
+      assert {:error, :already_closed} = Flier.Entries.Native.readdir(ref, 1)
     end
   end
 
@@ -593,6 +604,22 @@ defmodule Flier.EntriesTest do
       end
     end
 
+    test "yields every entry when a directory spans several native batches",
+         %{tmp_dir: tmp_dir} do
+      sub = Path.join(tmp_dir, "sub")
+      File.mkdir!(sub)
+      for i <- 1..700, do: File.write!(Path.join(tmp_dir, "f#{i}"), "x")
+      for i <- 1..700, do: File.write!(Path.join(sub, "g#{i}"), "x")
+
+      flat = tmp_dir |> Flier.Entries.stream() |> Enum.to_list()
+      assert length(flat) == 701
+
+      recursive = tmp_dir |> Flier.Entries.stream(recursive: true) |> Enum.to_list()
+      assert length(recursive) == 1401
+      assert Enum.count(recursive, &(&1.path == "sub")) == 700
+      assert recursive |> Enum.uniq_by(&{&1.path, &1.name}) |> length() == 1401
+    end
+
     @tag :slow
     test "handles 5000 entries in flat stream", %{tmp_dir: tmp_dir} do
       for i <- 1..5000, do: File.write!(Path.join(tmp_dir, "f#{i}"), "x")
@@ -603,8 +630,8 @@ defmodule Flier.EntriesTest do
   describe "Native edge cases" do
     test "readdir after exhaustion is idempotent", %{tmp_dir: tmp_dir} do
       {:ok, ref} = Flier.Entries.Native.opendir(tmp_dir)
-      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref)
-      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref)
+      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref, 1)
+      assert {:error, :end_of_directory} = Flier.Entries.Native.readdir(ref, 1)
       Flier.Entries.Native.closedir(ref)
     end
 
@@ -613,9 +640,9 @@ defmodule Flier.EntriesTest do
       File.write!(Path.join(tmp_dir, "b"), "x")
 
       {:ok, ref} = Flier.Entries.Native.opendir(tmp_dir)
-      assert {:ok, _} = Flier.Entries.Native.readdir(ref)
+      assert {:ok, [_]} = Flier.Entries.Native.readdir(ref, 1)
       Flier.Entries.Native.closedir(ref)
-      assert {:error, :already_closed} = Flier.Entries.Native.readdir(ref)
+      assert {:error, :already_closed} = Flier.Entries.Native.readdir(ref, 1)
     end
 
     test "opendir/1 accepts non-UTF-8 paths", %{tmp_dir: tmp_dir} do
@@ -643,8 +670,8 @@ defmodule Flier.EntriesTest do
 
   # Helper to read all entries from a directory reference
   defp read_all_entries(ref, acc \\ []) do
-    case Flier.Entries.Native.readdir(ref) do
-      {:ok, entry} -> read_all_entries(ref, [entry | acc])
+    case Flier.Entries.Native.readdir(ref, 2) do
+      {:ok, entries} -> read_all_entries(ref, Enum.reverse(entries, acc))
       {:error, :end_of_directory} -> Enum.reverse(acc)
     end
   end

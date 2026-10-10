@@ -18,6 +18,6 @@ defmodule Flier.Entries.Native do
     nif_versions: ["2.16", "2.17", "2.18"]
 
   def opendir(_path), do: :erlang.nif_error(:nif_not_loaded)
-  def readdir(_ref), do: :erlang.nif_error(:nif_not_loaded)
+  def readdir(_ref, _max, _path \\ "."), do: :erlang.nif_error(:nif_not_loaded)
   def closedir(_ref), do: :erlang.nif_error(:nif_not_loaded)
 end
