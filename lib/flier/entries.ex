@@ -68,9 +68,10 @@ defmodule Flier.Entries do
   - `follow_symlinks: boolean` — When `true`, symbolic links that point to
     directories are descended into during a recursive walk. When `false`
     (default), symlinked directories are yielded as entries but not recursed
-    into. Only relevant when `recursive: true`. Note: enabling this without a
-    `max_depth` guard may cause infinite loops if the directory tree contains
-    symlink cycles.
+    into. Only relevant when `recursive: true`. A link that points back to a
+    directory on the current branch (itself or an ancestor) is yielded but
+    not followed, so symlink cycles terminate. A directory reachable through
+    several links is walked once per link.
 
   - `on_error: :skip | :raise` — Controls behaviour when a subdirectory cannot
     be opened (e.g. due to a permission error) or reading it fails midway. `:skip` (default) silently
@@ -110,8 +111,8 @@ defmodule Flier.Entries do
       Flier.Entries.stream("/home/user", recursive: true, max_depth: 2)
       |> Enum.to_list()
 
-      # Recursive, follow symlinked dirs (use max_depth to guard against cycles)
-      Flier.Entries.stream("/home/user", recursive: true, follow_symlinks: true, max_depth: 10)
+      # Recursive, following symlinked directories
+      Flier.Entries.stream("/home/user", recursive: true, follow_symlinks: true)
       |> Enum.to_list()
 
       # Count entries in a directory
@@ -130,7 +131,7 @@ defmodule Flier.Entries do
       end
 
     Stream.resource(
-      fn -> [{:pending, path, ".", 0}] end,
+      fn -> [{:pending, path, ".", 0, if(walk.follow_symlinks, do: [], else: nil)}] end,
       &next(&1, walk),
       &close_all/1
     )
@@ -157,17 +158,21 @@ defmodule Flier.Entries do
   @batch_size 256
 
   # The state is a depth-first stack of frames:
-  #   {:pending, dir, rel_path, depth}       — directory not yet opened
-  #   {:reading, ref, dir, rel_path, depth}  — open handle, read a batch per step
+  #   {:pending, dir, rel_path, depth, ancestors}       — directory not yet opened
+  #   {:reading, ref, dir, rel_path, depth, ancestors}  — open handle, read a batch per step
+  #
+  # When following symlinks, `ancestors` lists the {device, inode} of every
+  # directory from the root down to `dir` so links back into the current
+  # branch are not followed; otherwise it is nil.
   #
   # The subdirectories found in a batch are pushed above their parent, so they
   # are walked before the parent's next batch is read.
   defp next([], _walk), do: {:halt, []}
 
-  defp next([{:pending, dir, rel_path, depth} | rest], walk) do
+  defp next([{:pending, dir, rel_path, depth, ancestors} | rest], walk) do
     case Flier.Entries.Native.opendir(dir) do
       {:ok, ref} ->
-        {[], [{:reading, ref, dir, rel_path, depth} | rest]}
+        {[], [{:reading, ref, dir, rel_path, depth, track(ancestors, dir)} | rest]}
 
       # The root must always be readable; on_error only governs subdirectories.
       {:error, reason} when depth == 0 or walk.on_error == :raise ->
@@ -178,14 +183,14 @@ defmodule Flier.Entries do
     end
   end
 
-  defp next([{:reading, ref, dir, rel_path, depth} = frame | rest], walk) do
+  defp next([{:reading, ref, dir, rel_path, depth, ancestors} = frame | rest], walk) do
     case Flier.Entries.Native.readdir(ref, @batch_size, rel_path) do
       {:ok, entries} ->
         subdirs =
           if depth_allowed?(depth, walk.max_depth) do
             for %{name: name, type: type} <- entries,
-                descend?(type, dir, name, walk.follow_symlinks),
-                do: pending_subdir(dir, rel_path, name, depth)
+                descend?(type, dir, name, ancestors),
+                do: pending_subdir(dir, rel_path, name, depth, ancestors)
           else
             []
           end
@@ -205,21 +210,40 @@ defmodule Flier.Entries do
 
   # Close any directory handles still open when the stream halts early.
   defp close_all(stack) do
-    for {:reading, ref, _, _, _} <- stack, do: Flier.Entries.Native.closedir(ref)
+    for {:reading, ref, _, _, _, _} <- stack, do: Flier.Entries.Native.closedir(ref)
     :ok
   end
 
   defp depth_allowed?(_depth, :infinity), do: true
   defp depth_allowed?(depth, max_depth), do: depth < max_depth
 
-  # Only descend into real directories, or symlinks whose target is a
-  # directory (broken links and links to files are yielded but not followed).
-  defp descend?(:directory, _dir, _name, _follow_symlinks), do: true
-  defp descend?(:symlink, dir, name, true), do: File.dir?(Path.join(dir, name))
-  defp descend?(_type, _dir, _name, _follow_symlinks), do: false
+  # Only descend into real directories, or, when following symlinks, links
+  # whose target is a directory outside the current branch. Broken links,
+  # links to files and links back to an ancestor are yielded but not followed.
+  defp descend?(:directory, _dir, _name, _ancestors), do: true
 
-  defp pending_subdir(dir, rel_path, name, depth),
-    do: {:pending, Path.join(dir, name), sub_path(rel_path, name), depth + 1}
+  defp descend?(:symlink, dir, name, ancestors) when is_list(ancestors) do
+    case File.stat(Path.join(dir, name)) do
+      {:ok, %File.Stat{type: :directory} = stat} -> dir_id(stat) not in ancestors
+      _ -> false
+    end
+  end
+
+  defp descend?(_type, _dir, _name, _ancestors), do: false
+
+  defp pending_subdir(dir, rel_path, name, depth, ancestors),
+    do: {:pending, Path.join(dir, name), sub_path(rel_path, name), depth + 1, ancestors}
+
+  defp track(nil, _dir), do: nil
+
+  defp track(ancestors, dir) do
+    case File.stat(dir) do
+      {:ok, stat} -> [dir_id(stat) | ancestors]
+      {:error, _} -> ancestors
+    end
+  end
+
+  defp dir_id(%File.Stat{major_device: device, inode: inode}), do: {device, inode}
 
   defp sub_path(".", name), do: name
   defp sub_path(rel_path, name), do: Path.join(rel_path, name)

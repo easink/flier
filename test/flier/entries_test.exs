@@ -491,6 +491,39 @@ defmodule Flier.EntriesTest do
       assert length(entries) > 0
     end
 
+    test "a symlink to an ancestor is yielded but not descended into", %{tmp_dir: tmp_dir} do
+      File.mkdir!(Path.join(tmp_dir, "sub"))
+      File.ln_s!(tmp_dir, Path.join(tmp_dir, "sub/up"))
+
+      entries =
+        walk_with_timeout(fn ->
+          tmp_dir
+          |> Flier.Entries.stream(recursive: true, follow_symlinks: true)
+          |> Enum.map(&{&1.path, &1.name})
+        end)
+
+      assert Enum.sort(entries) == [{".", "sub"}, {"sub", "up"}]
+    end
+
+    test "mutually linked directories are each followed once per branch",
+         %{tmp_dir: tmp_dir} do
+      a = Path.join(tmp_dir, "a")
+      b = Path.join(tmp_dir, "b")
+      File.mkdir!(a)
+      File.mkdir!(b)
+      File.ln_s!(b, Path.join(a, "to_b"))
+      File.ln_s!(a, Path.join(b, "to_a"))
+
+      entries =
+        walk_with_timeout(fn ->
+          tmp_dir
+          |> Flier.Entries.stream(recursive: true, follow_symlinks: true)
+          |> Enum.map(&Path.relative_to(Path.join(&1.path, &1.name), "."))
+        end)
+
+      assert Enum.sort(entries) == ~w(a a/to_b a/to_b/to_a b b/to_a b/to_a/to_b)
+    end
+
     test "two concurrent recursive walks produce identical sets", %{tmp_dir: tmp_dir} do
       File.mkdir_p!(Path.join(tmp_dir, "a/b/c"))
 
@@ -665,6 +698,16 @@ defmodule Flier.EntriesTest do
       names2 = (tmp_dir <> "/") |> Flier.Entries.stream() |> Enum.map(& &1.name)
 
       assert Enum.sort(names1) == Enum.sort(names2)
+    end
+  end
+
+  # Run a walk that could loop forever without failing to terminate the suite.
+  defp walk_with_timeout(fun) do
+    task = Task.async(fun)
+
+    case Task.yield(task, 2000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      nil -> flunk("walk did not terminate")
     end
   end
 
