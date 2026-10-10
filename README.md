@@ -1,38 +1,18 @@
 # Flier
 
-Add some file functions in Elixir by adding some NIFs using Rustler.
+Linux file-system helpers for Elixir, implemented as Rust NIFs:
 
-- inotify
-- file listing stream
+- **`Flier.Inotify`** — watch a directory for events (create, modify,
+  delete, move, open, close, access, attribute changes) via `inotify`, as
+  messages or as a `Stream`.
+- **`Flier.Entries`** — lazily stream the entries of a directory, flat or
+  recursively, with their file type.
 
-## Examples (inotify)
-
-``` elixir
-{:ok, %Flier.Inotify.Watcher{ref: ref} = watcher} = Flier.Inotify.start_watcher("/tmp", [:create])
-receive do
-    {:inotify_event, ^ref, file, mask} -> IO.puts("File '#{file}' triggered by #{inspect mask}")
-end
-:stopped = Flier.Inotify.stop_watcher(watcher)
-```
-
-``` elixir
-"/tmp"
-|> Flier.Inotify.stream([:close_write])
-|> Enum.each(fn {file, mask} -> IO.puts("File '#{file}' triggered by #{inspect mask}") end)
-```
-
-## Examples (entries)
-
-``` elixir
-"/tmp"
-|> Flier.Entries.stream()
-|> Enum.each(fn entry -> IO.puts("Entry '#{entry.name}' is a '#{entry.type}'") end)
-```
+Flier is Linux-only. Precompiled NIFs are provided for x86_64, aarch64,
+32-bit ARM (gnueabihf) and riscv64 glibc targets, so no Rust toolchain is
+needed.
 
 ## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be
-installed by adding `flier` to your list of dependencies in `mix.exs`:
 
 ``` elixir
 def deps do
@@ -42,7 +22,62 @@ def deps do
 end
 ```
 
-Documentation can be generated with
-[ExDoc](https://github.com/elixir-lang/ex_doc) and published on
-[HexDocs](https://hexdocs.pm). Once published, the docs can be found at
-<https://hexdocs.pm/flier>.
+To build the NIFs from source instead (for example on musl), see
+"Building from source" in the `Flier` module docs.
+
+## Watching a directory
+
+Messages are tagged with the watcher's `ref`, so several watchers can share
+a process:
+
+``` elixir
+{:ok, %Flier.Inotify.Watcher{ref: ref} = watcher} =
+  Flier.Inotify.start_watcher("/tmp", [:create, :delete])
+
+receive do
+  {:inotify_event, ^ref, file, masks} -> IO.puts("#{file}: #{inspect(masks)}")
+end
+
+:stopped = Flier.Inotify.stop_watcher(watcher)
+```
+
+Or as a stream, which starts and stops the watcher for you:
+
+``` elixir
+"/tmp"
+|> Flier.Inotify.stream([:close_write])
+|> Enum.each(fn {file, masks} -> IO.puts("#{file}: #{inspect(masks)}") end)
+```
+
+Errors are POSIX error atoms, as with `File`:
+
+``` elixir
+{:error, :enoent} = Flier.Inotify.start_watcher("/does/not/exist", :all)
+```
+
+## Listing a directory
+
+``` elixir
+"/tmp"
+|> Flier.Entries.stream()
+|> Enum.each(fn entry -> IO.puts("#{entry.name} is a #{entry.type}") end)
+```
+
+Recursively, with an optional depth limit and symlink following:
+
+``` elixir
+root = "/home/user/projects"
+
+root
+|> Flier.Entries.stream(recursive: true, max_depth: 3)
+|> Stream.filter(&(&1.type == :file))
+|> Enum.map(&Path.join([root, &1.path, &1.name]))
+```
+
+If the root directory cannot be read, enumerating the stream raises a
+`File.Error`. Unreadable subdirectories are skipped, unless
+`on_error: :raise` is given.
+
+## Documentation
+
+Full documentation is at <https://hexdocs.pm/flier>.
