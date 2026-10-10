@@ -209,6 +209,9 @@ defmodule Flier.Inotify do
   - `mask` — A list of event atoms (see module docs), or `:all`. Defaults to
     all supported event types.
 
+  Raises a `File.Error` when enumeration starts if `path` cannot be watched;
+  its `:reason` is the error `start_watcher/3` would return.
+
   ## Examples
 
       # Collect the next 5 write events in /tmp
@@ -229,8 +232,13 @@ defmodule Flier.Inotify do
   def stream(path, mask \\ :all) do
     Stream.resource(
       fn ->
-        {:ok, watcher} = start_watcher(path, mask)
-        {watcher, :running}
+        case start_watcher(path, mask) do
+          {:ok, watcher} ->
+            {watcher, :running}
+
+          {:error, reason} ->
+            raise File.Error, reason: reason, action: "watch directory", path: path
+        end
       end,
       &next_event/1,
       fn {%Watcher{ref: ref} = watcher, _status} ->

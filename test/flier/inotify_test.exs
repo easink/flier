@@ -399,6 +399,17 @@ defmodule Flier.InotifyTest do
       assert :create in masks
     end
 
+    test "raises File.Error when the path cannot be watched" do
+      non_existent = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
+
+      error =
+        assert_raise File.Error, ~r/could not watch directory .*no such file/, fn ->
+          non_existent |> Flier.Inotify.stream([:create]) |> Enum.take(1)
+        end
+
+      assert %File.Error{reason: :enoent, path: ^non_existent} = error
+    end
+
     test "emits :ignored and halts when the watched directory is removed",
          %{tmp_dir: tmp_dir} do
       Task.start(fn ->
