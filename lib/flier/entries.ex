@@ -187,13 +187,9 @@ defmodule Flier.Entries do
     case Flier.Entries.Native.readdir(ref, @batch_size, rel_path) do
       {:ok, entries} ->
         subdirs =
-          if depth_allowed?(depth, walk.max_depth) do
-            for %{name: name, type: type} <- entries,
-                descend?(type, dir, name, ancestors),
-                do: pending_subdir(dir, rel_path, name, depth, ancestors)
-          else
-            []
-          end
+          if depth_allowed?(depth, walk.max_depth),
+            do: subdirs(entries, dir, rel_path, depth, ancestors),
+            else: []
 
         {entries, subdirs ++ [frame | rest]}
 
@@ -231,8 +227,12 @@ defmodule Flier.Entries do
 
   defp descend?(_type, _dir, _name, _ancestors), do: false
 
-  defp pending_subdir(dir, rel_path, name, depth, ancestors),
-    do: {:pending, Path.join(dir, name), sub_path(rel_path, name), depth + 1, ancestors}
+  # Pending frames for the entries of a batch that should be walked.
+  defp subdirs(entries, dir, rel_path, depth, ancestors) do
+    for %{name: name, type: type} <- entries,
+        descend?(type, dir, name, ancestors),
+        do: {:pending, Path.join(dir, name), sub_path(rel_path, name), depth + 1, ancestors}
+  end
 
   defp track(nil, _dir), do: nil
 

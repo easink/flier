@@ -487,8 +487,7 @@ defmodule Flier.EntriesTest do
         |> Enum.to_list()
 
       # Just needs to terminate; assert finite and non-trivial.
-      assert is_list(entries)
-      assert length(entries) > 0
+      assert [_ | _] = entries
     end
 
     test "a symlink to an ancestor is yielded but not descended into", %{tmp_dir: tmp_dir} do
