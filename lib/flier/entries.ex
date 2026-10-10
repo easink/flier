@@ -73,7 +73,7 @@ defmodule Flier.Entries do
 
   - `on_error: :skip | :raise` — Controls behaviour when a subdirectory cannot
     be opened (e.g. due to a permission error) or reading it fails midway. `:skip` (default) silently
-    continues the walk; `:raise` raises a `RuntimeError`. Only relevant when
+    continues the walk; `:raise` raises a `File.Error`. Only relevant when
     `recursive: true`. Failing to open or read the root `path` always raises.
 
   ## Returns
@@ -89,8 +89,10 @@ defmodule Flier.Entries do
 
       full = Path.expand(Path.join([root, entry.path, entry.name]))
 
-  Raises a `RuntimeError` when the stream is enumerated if `path` does not
-  exist or cannot be opened, regardless of `:on_error`.
+  Raises a `File.Error` when the stream is enumerated if `path` does not
+  exist or cannot be opened, regardless of `:on_error`. Its `:reason` is a
+  POSIX error atom such as `:enoent`, `:eacces` or `:enotdir`, and `:path` is
+  the directory that failed.
 
   ## Examples
 
@@ -199,6 +201,6 @@ defmodule Flier.Entries do
   defp sub_path(rel_path, name), do: Path.join(rel_path, name)
 
   defp raise_error(action, path, reason) do
-    raise "Flier.Entries.stream/2: cannot #{action} directory #{inspect(path)}: #{reason}"
+    raise File.Error, reason: reason, action: "#{action} directory", path: path
   end
 end

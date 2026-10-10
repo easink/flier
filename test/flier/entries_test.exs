@@ -313,9 +313,13 @@ defmodule Flier.EntriesTest do
       File.mkdir!(Path.join(tmp_dir, "no_access"))
       File.chmod!(Path.join(tmp_dir, "no_access"), 0o000)
 
-      assert_raise RuntimeError, ~r/cannot open directory/, fn ->
-        Flier.Entries.stream(tmp_dir, recursive: true, on_error: :raise) |> Enum.to_list()
-      end
+      error =
+        assert_raise File.Error, ~r/could not open directory/, fn ->
+          Flier.Entries.stream(tmp_dir, recursive: true, on_error: :raise) |> Enum.to_list()
+        end
+
+      no_access = Path.join(tmp_dir, "no_access")
+      assert %File.Error{reason: :eacces, path: ^no_access} = error
 
       File.chmod!(Path.join(tmp_dir, "no_access"), 0o755)
     end
@@ -353,7 +357,7 @@ defmodule Flier.EntriesTest do
     test "missing root raises even with default on_error: :skip" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
-      assert_raise RuntimeError, ~r/cannot open directory .*enoent/, fn ->
+      assert_raise File.Error, ~r/could not open directory .*no such file or directory/, fn ->
         Flier.Entries.stream(non, recursive: true) |> Enum.to_list()
       end
     end
@@ -361,7 +365,7 @@ defmodule Flier.EntriesTest do
     test "missing root raises with on_error: :raise" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
-      assert_raise RuntimeError, ~r/cannot open directory/, fn ->
+      assert_raise File.Error, ~r/could not open directory/, fn ->
         Flier.Entries.stream(non, recursive: true, on_error: :raise) |> Enum.to_list()
       end
     end
@@ -539,7 +543,7 @@ defmodule Flier.EntriesTest do
     test "stream/2 raises on missing path in flat mode" do
       non = "/tmp/flier_missing_#{System.unique_integer([:positive])}"
 
-      assert_raise RuntimeError, ~r/cannot open directory .*enoent/, fn ->
+      assert_raise File.Error, ~r/could not open directory .*no such file or directory/, fn ->
         Flier.Entries.stream(non) |> Enum.to_list()
       end
     end
@@ -548,7 +552,7 @@ defmodule Flier.EntriesTest do
       file = Path.join(tmp_dir, "file.txt")
       File.write!(file, "x")
 
-      assert_raise RuntimeError, ~r/cannot open directory .*enotdir/, fn ->
+      assert_raise File.Error, ~r/could not open directory .*not a directory/, fn ->
         Flier.Entries.stream(file) |> Enum.to_list()
       end
     end
