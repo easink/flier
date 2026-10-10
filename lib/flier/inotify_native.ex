@@ -17,6 +17,6 @@ defmodule Flier.Inotify.Native do
     ),
     nif_versions: ["2.16", "2.17", "2.18"]
 
-  def start_watcher(_path, _mask, _pid, _ref), do: :erlang.nif_error(:nif_not_loaded)
+  def start_watcher(_path, _mask, _pid, _ref, _flags), do: :erlang.nif_error(:nif_not_loaded)
   def stop_watcher(_ref), do: :erlang.nif_error(:nif_not_loaded)
 end

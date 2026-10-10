@@ -82,8 +82,10 @@ impl Drop for WatcherResource {
     }
 }
 
-/// Start watching `path`. Returns `{:ok, resource}` or `{:error, errno}`
-/// with a POSIX errno atom such as `:enoent`, `:eacces` or `:enospc`.
+/// Start watching `path` for the events in `event_list`, adding the watch
+/// flags in `flag_list` (`:only_dir`, `:dont_follow`). Returns
+/// `{:ok, resource}` or `{:error, errno}` with a POSIX errno atom such as
+/// `:enoent`, `:eacces` or `:enospc`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn start_watcher(
     env: Env,
@@ -91,12 +93,17 @@ fn start_watcher(
     event_list: Vec<Atom>,
     pid: LocalPid,
     tag: Term,
+    flag_list: Vec<Atom>,
 ) -> Result<ResourceArc<WatcherResource>, Atom> {
-    let event_names: Vec<String> = event_list
-        .iter()
-        .filter_map(|atom| atom.to_term(env).atom_to_string().ok())
-        .collect();
-    let mask = build_watch_mask(event_names.iter().map(String::as_str));
+    let atom_names = |atoms: Vec<Atom>| -> Vec<String> {
+        atoms
+            .iter()
+            .filter_map(|atom| atom.to_term(env).atom_to_string().ok())
+            .collect()
+    };
+    let events = build_watch_mask(atom_names(event_list).iter().map(String::as_str));
+    let flags = build_flags(atom_names(flag_list).iter().map(String::as_str));
+    let mask = events | flags;
     let path = OsStr::from_bytes(path.as_slice());
 
     let mut guard = lock_hub();
@@ -125,7 +132,7 @@ fn start_watcher(
             id,
             pid,
             tag: (tag_env, tag),
-            events: EventMask::from_bits_truncate(mask.bits()),
+            events: EventMask::from_bits_truncate(events.bits()),
         });
     drop(guard);
 
@@ -307,7 +314,7 @@ fn read_loop(mut inotify: Inotify) {
 rustler::init!("Elixir.Flier.Inotify.Native");
 
 /// Subscribable events: Elixir atom name, inotify watch flag, and event flag.
-const EVENTS: [(&str, WatchMask, EventMask); 10] = [
+const EVENTS: [(&str, WatchMask, EventMask); 12] = [
     ("create", WatchMask::CREATE, EventMask::CREATE),
     ("modify", WatchMask::MODIFY, EventMask::MODIFY),
     ("delete", WatchMask::DELETE, EventMask::DELETE),
@@ -326,7 +333,31 @@ const EVENTS: [(&str, WatchMask, EventMask); 10] = [
         EventMask::CLOSE_NOWRITE,
     ),
     ("open", WatchMask::OPEN, EventMask::OPEN),
+    (
+        "delete_self",
+        WatchMask::DELETE_SELF,
+        EventMask::DELETE_SELF,
+    ),
+    ("move_self", WatchMask::MOVE_SELF, EventMask::MOVE_SELF),
 ];
+
+/// Flags changing how the watched path is resolved, by Elixir atom name.
+/// They only apply when the watch is added, so watchers sharing a watch do
+/// not affect each other through them.
+const FLAGS: [(&str, WatchMask); 2] = [
+    ("only_dir", WatchMask::ONLYDIR),
+    ("dont_follow", WatchMask::DONT_FOLLOW),
+];
+
+/// Build the watch flags; unknown names are ignored (validated in Elixir).
+fn build_flags<'a>(names: impl IntoIterator<Item = &'a str>) -> WatchMask {
+    let names: Vec<&str> = names.into_iter().collect();
+
+    FLAGS
+        .iter()
+        .filter(|(name, _)| names.contains(name))
+        .fold(WatchMask::empty(), |mask, (_, flag)| mask | *flag)
+}
 
 /// Flags the kernel reports without being subscribed to.
 const REPORT_ONLY: [(&str, EventMask); 4] = [
@@ -400,6 +431,20 @@ mod tests {
         assert_eq!(
             build_watch_mask(["create", "close_write", "isdir", "bogus"]),
             WatchMask::CREATE | WatchMask::CLOSE_WRITE
+        );
+    }
+
+    #[test]
+    fn self_events_are_named() {
+        assert_eq!(mask_names(EventMask::DELETE_SELF), ["delete_self"]);
+        assert_eq!(mask_names(EventMask::MOVE_SELF), ["move_self"]);
+    }
+
+    #[test]
+    fn flags_from_names() {
+        assert_eq!(
+            build_flags(["only_dir", "dont_follow", "bogus"]),
+            WatchMask::ONLYDIR | WatchMask::DONT_FOLLOW
         );
     }
 

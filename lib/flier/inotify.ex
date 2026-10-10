@@ -34,9 +34,13 @@ defmodule Flier.Inotify do
   | `:close_nowrite` | A file opened read-only was closed |
   | `:open` | A file or directory was opened |
   | `:attrib` | File metadata (permissions, timestamps, etc.) changed |
+  | `:delete_self` | The watched directory itself was deleted. Delivered with an empty filename. |
+  | `:move_self` | The watched directory itself was moved. Delivered with an empty filename. |
 
   Pass the special atom `:all` as the mask to subscribe to all of the above
-  events at once. Unknown atoms raise an `ArgumentError`.
+  events at once. In a mask list, `:close` is shorthand for `:close_write`
+  and `:close_nowrite`; events still report which of the two occurred.
+  Unknown atoms raise an `ArgumentError`.
 
   Events may additionally carry these flags, which are always reported by the
   kernel and do not need to be subscribed to (they are accepted in a mask but
@@ -98,11 +102,19 @@ defmodule Flier.Inotify do
     :close_write,
     :close_nowrite,
     :open,
-    :attrib
+    :attrib,
+    :delete_self,
+    :move_self
   ]
 
   # Flags the kernel reports on its own; accepted in a mask but have no effect.
   @report_only [:ignored, :isdir, :q_overflow, :unmount]
+
+  # Mask shorthands and the events they stand for.
+  @aliases %{close: [:close_write, :close_nowrite]}
+
+  # Options shared by start_watcher/3 and stream/3, with their defaults.
+  @watch_opts [only_dir: false, follow_symlink: true]
 
   @doc """
   Starts an inotify watcher on `path` for the given event `mask`.
@@ -126,7 +138,19 @@ defmodule Flier.Inotify do
   - `mask` — A list of event atoms to subscribe to (see module docs for the
     full list), or the atom `:all` to subscribe to every event type. Raises
     `ArgumentError` for unknown atoms or when no subscribable event is given.
-  - `pid` — The process to deliver events to. Defaults to `self()`.
+  - `opts` — Keyword options (see below). Passing a pid instead is shorthand
+    for `pid: pid`.
+
+  ## Options
+
+  - `pid: pid()` — The process to deliver events to. Defaults to `self()`.
+  - `only_dir: boolean` — When `true`, fail with `{:error, :enotdir}` unless
+    `path` is a directory. Defaults to `false`, which also allows watching a
+    single file.
+  - `follow_symlink: boolean` — When `false` and `path` is a symbolic link,
+    the link itself is watched rather than its target. Defaults to `true`.
+
+  Unknown options or invalid option values raise an `ArgumentError`.
 
   ## Returns
 
@@ -142,15 +166,21 @@ defmodule Flier.Inotify do
 
       {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:create])
       {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", :all)
-      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:modify], some_pid)
+      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:modify], pid: some_pid)
+      {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:close], only_dir: true)
   """
-  @spec start_watcher(path :: String.t(), [atom()] | :all, pid()) ::
+  @spec start_watcher(path :: String.t(), [atom()] | :all, keyword() | pid()) ::
           {:ok, Watcher.t()} | {:error, File.posix() | :unknown}
-  def start_watcher(path, mask, pid \\ self()) do
+  def start_watcher(path, mask, opts \\ [])
+
+  def start_watcher(path, mask, pid) when is_pid(pid), do: start_watcher(path, mask, pid: pid)
+
+  def start_watcher(path, mask, opts) do
     mask = validate_mask!(mask)
+    opts = validate_opts!(opts, [pid: self()] ++ @watch_opts)
     ref = make_ref()
 
-    case Flier.Inotify.Native.start_watcher(path, mask, pid, ref) do
+    case Flier.Inotify.Native.start_watcher(path, mask, opts[:pid], ref, watch_flags(opts)) do
       {:ok, resource} -> {:ok, %Watcher{ref: ref, resource: resource}}
       {:error, _reason} = error -> error
     end
@@ -159,6 +189,8 @@ defmodule Flier.Inotify do
   defp validate_mask!(:all), do: @events
 
   defp validate_mask!(mask) when is_list(mask) do
+    mask = Enum.flat_map(mask, &Map.get(@aliases, &1, [&1]))
+
     case Enum.reject(mask, &(&1 in @events or &1 in @report_only)) do
       [] -> :ok
       unknown -> raise ArgumentError, "unknown inotify event(s): #{inspect(unknown)}"
@@ -174,6 +206,26 @@ defmodule Flier.Inotify do
 
   defp validate_mask!(mask) do
     raise ArgumentError, "inotify mask must be a list of events or :all, got: #{inspect(mask)}"
+  end
+
+  defp validate_opts!(opts, defaults) do
+    opts = Keyword.validate!(opts, defaults)
+
+    for {key, value} <- opts, not valid_opt?(key, value) do
+      raise ArgumentError, "invalid value for #{inspect(key)} option: #{inspect(value)}"
+    end
+
+    opts
+  end
+
+  defp valid_opt?(:pid, value), do: is_pid(value)
+  defp valid_opt?(:only_dir, value), do: is_boolean(value)
+  defp valid_opt?(:follow_symlink, value), do: is_boolean(value)
+
+  # The inotify flags requested by the options.
+  defp watch_flags(opts) do
+    for {flag, true} <- [only_dir: opts[:only_dir], dont_follow: not opts[:follow_symlink]],
+        do: flag
   end
 
   @doc """
@@ -229,8 +281,10 @@ defmodule Flier.Inotify do
   - `path` — Absolute path to the directory to watch.
   - `mask` — A list of event atoms (see module docs), or `:all`. Defaults to
     all supported event types.
+  - `opts` — The `:only_dir` and `:follow_symlink` options of
+    `start_watcher/3`. Events always go to the enumerating process.
 
-  Raises an `ArgumentError` immediately for an invalid `mask`, and a
+  Raises an `ArgumentError` immediately for an invalid `mask` or `opts`, and a
   `File.Error` when enumeration starts if `path` cannot be watched; its
   `:reason` is the error `start_watcher/3` would return. A `File.Error` is
   also raised during enumeration if the watcher fails to read events.
@@ -251,13 +305,14 @@ defmodule Flier.Inotify do
         |> Stream.run()
       end)
   """
-  @spec stream(path :: String.t(), [atom()] | :all) :: Enumerable.t(Event.t())
-  def stream(path, mask \\ :all) do
+  @spec stream(path :: String.t(), [atom()] | :all, keyword()) :: Enumerable.t(Event.t())
+  def stream(path, mask \\ :all, opts \\ []) do
     validate_mask!(mask)
+    validate_opts!(opts, @watch_opts)
 
     Stream.resource(
       fn ->
-        case start_watcher(path, mask) do
+        case start_watcher(path, mask, opts) do
           {:ok, watcher} ->
             {watcher, :running}
 

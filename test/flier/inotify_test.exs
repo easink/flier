@@ -584,6 +584,133 @@ defmodule Flier.InotifyTest do
     end
   end
 
+  describe "self events" do
+    test ":delete_self is reported when the watched directory is deleted", %{tmp_dir: tmp_dir} do
+      {:ok, %{ref: ref} = watcher} = Flier.Inotify.start_watcher(tmp_dir, [:delete_self])
+      File.rm_rf!(tmp_dir)
+
+      assert_receive {:inotify_event, ^ref, %Event{name: "", masks: [:delete_self]}}, 1000
+      assert_receive {:inotify_event, ^ref, %Event{masks: [:ignored]}}, 1000
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
+    test ":move_self is reported when the watched directory is moved", %{tmp_dir: tmp_dir} do
+      moved = tmp_dir <> "_moved"
+      on_exit(fn -> File.rm_rf!(moved) end)
+      {:ok, %{ref: ref} = watcher} = Flier.Inotify.start_watcher(tmp_dir, [:move_self])
+      File.rename!(tmp_dir, moved)
+
+      assert_receive {:inotify_event, ^ref, %Event{name: "", masks: [:move_self]}}, 1000
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
+    test ":all includes :delete_self", %{tmp_dir: tmp_dir} do
+      {:ok, %{ref: ref} = watcher} = Flier.Inotify.start_watcher(tmp_dir, :all)
+      File.rm_rf!(tmp_dir)
+
+      assert_receive {:inotify_event, ^ref, %Event{masks: [:delete_self]}}, 1000
+      Flier.Inotify.stop_watcher(watcher)
+    end
+  end
+
+  describe ":close" do
+    test "subscribes to both close events", %{tmp_dir: tmp_dir} do
+      {:ok, %{ref: ref} = watcher} = Flier.Inotify.start_watcher(tmp_dir, [:close])
+      file = Path.join(tmp_dir, "closed.txt")
+
+      File.write!(file, "x")
+
+      assert_receive {:inotify_event, ^ref, %Event{name: "closed.txt", masks: [:close_write]}},
+                     1000
+
+      File.read!(file)
+
+      assert_receive {:inotify_event, ^ref, %Event{name: "closed.txt", masks: [:close_nowrite]}},
+                     1000
+
+      Flier.Inotify.stop_watcher(watcher)
+    end
+  end
+
+  describe "options" do
+    test ":pid sends events to another process", %{tmp_dir: tmp_dir} do
+      parent = self()
+
+      receiver =
+        spawn(fn ->
+          receive do
+            {:inotify_event, _, %Event{name: name}} -> send(parent, {:received, name})
+          end
+        end)
+
+      {:ok, watcher} = Flier.Inotify.start_watcher(tmp_dir, [:create], pid: receiver)
+      File.write!(Path.join(tmp_dir, "for_pid.txt"), "x")
+
+      assert_receive {:received, "for_pid.txt"}, 1000
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
+    test "only_dir: true refuses to watch a file", %{tmp_dir: tmp_dir} do
+      file = Path.join(tmp_dir, "plain.txt")
+      File.write!(file, "x")
+
+      assert {:error, :enotdir} = Flier.Inotify.start_watcher(file, [:modify], only_dir: true)
+      assert {:ok, watcher} = Flier.Inotify.start_watcher(file, [:modify], only_dir: false)
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
+    test "follow_symlink: false watches the link rather than its target", %{tmp_dir: tmp_dir} do
+      target = Path.join(tmp_dir, "target")
+      link = Path.join(tmp_dir, "link")
+      File.mkdir!(target)
+      File.ln_s!(target, link)
+
+      {:ok, %{ref: own} = w1} =
+        Flier.Inotify.start_watcher(link, [:create], follow_symlink: false)
+
+      {:ok, %{ref: followed} = w2} = Flier.Inotify.start_watcher(link, [:create])
+
+      File.write!(Path.join(target, "inside.txt"), "x")
+
+      assert_receive {:inotify_event, ^followed, %Event{name: "inside.txt"}}, 1000
+      refute_receive {:inotify_event, ^own, %Event{}}, 100
+
+      Flier.Inotify.stop_watcher(w1)
+      Flier.Inotify.stop_watcher(w2)
+    end
+
+    test "unknown options raise", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/:bogus/, fn ->
+        Flier.Inotify.start_watcher(tmp_dir, [:create], bogus: true)
+      end
+    end
+
+    test "invalid option values raise", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/:only_dir/, fn ->
+        Flier.Inotify.start_watcher(tmp_dir, [:create], only_dir: :yes)
+      end
+
+      assert_raise ArgumentError, ~r/:pid/, fn ->
+        Flier.Inotify.start_watcher(tmp_dir, [:create], pid: :not_a_pid)
+      end
+    end
+
+    test "stream/3 passes options on", %{tmp_dir: tmp_dir} do
+      file = Path.join(tmp_dir, "plain.txt")
+      File.write!(file, "x")
+
+      assert_raise File.Error, ~r/not a directory/, fn ->
+        file |> Flier.Inotify.stream([:modify], only_dir: true) |> Enum.take(1)
+      end
+    end
+
+    test "stream/3 does not accept :pid", %{tmp_dir: tmp_dir} do
+      assert_raise ArgumentError, ~r/:pid/, fn ->
+        Flier.Inotify.stream(tmp_dir, [:create], pid: self())
+      end
+    end
+  end
+
   describe "shared inotify instance" do
     test "many watchers share one inotify instance and reader thread", %{tmp_dir: tmp_dir} do
       watchers =
