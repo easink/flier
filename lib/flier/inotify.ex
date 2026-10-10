@@ -189,6 +189,9 @@ defmodule Flier.Inotify do
   events still in the mailbox are discarded; events from other watchers are
   left untouched. The stream is infinite
   by default — use `Stream.take/2`, `Enum.take/2`, or similar to bound it.
+  It ends on its own only when the watch is removed by the kernel (e.g. the
+  watched directory is deleted or unmounted), after emitting the final event
+  carrying the `:ignored` flag.
 
   > #### Blocking {: .warning}
   >
@@ -223,18 +226,25 @@ defmodule Flier.Inotify do
     Stream.resource(
       fn ->
         {:ok, watcher} = start_watcher(path, mask)
-        watcher
+        {watcher, :running}
       end,
-      fn %Watcher{ref: ref} = watcher ->
-        receive do
-          {:inotify_event, ^ref, file, masks} -> {[{file, masks}], watcher}
-        end
-      end,
-      fn %Watcher{ref: ref} = watcher ->
+      &next_event/1,
+      fn {%Watcher{ref: ref} = watcher, _status} ->
         stop_watcher(watcher)
         flush_events(ref)
       end
     )
+  end
+
+  defp next_event({_watcher, :done} = state), do: {:halt, state}
+
+  defp next_event({%Watcher{ref: ref} = watcher, :running}) do
+    receive do
+      {:inotify_event, ^ref, file, masks} ->
+        # :ignored means the watch is gone; no further events can follow.
+        status = if :ignored in masks, do: :done, else: :running
+        {[{file, masks}], {watcher, status}}
+    end
   end
 
   # The watcher thread is joined by stop_watcher/1, so no events for `ref`

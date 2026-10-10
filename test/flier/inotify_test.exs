@@ -390,6 +390,20 @@ defmodule Flier.InotifyTest do
       assert filename == "stream_test.txt"
       assert :create in masks
     end
+
+    test "emits :ignored and halts when the watched directory is removed",
+         %{tmp_dir: tmp_dir} do
+      Task.start(fn ->
+        Process.sleep(100)
+        File.rm_rf!(tmp_dir)
+      end)
+
+      task = Task.async(fn -> tmp_dir |> Flier.Inotify.stream([:create]) |> Enum.to_list() end)
+      events = Task.await(task, 1000)
+
+      assert {_, masks} = List.last(events)
+      assert :ignored in masks
+    end
   end
 
   describe "event tagging" do
