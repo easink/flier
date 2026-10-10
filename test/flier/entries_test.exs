@@ -222,6 +222,12 @@ defmodule Flier.EntriesTest do
       assert Map.has_key?(entry, :path)
     end
 
+    test "requires all fields" do
+      assert_raise ArgumentError, ~r/:path/, fn ->
+        struct!(Flier.Entries.Entry, name: "a", type: :file)
+      end
+    end
+
     test "flat stream entries have path: \".\"", %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "test.txt"), "content")
 

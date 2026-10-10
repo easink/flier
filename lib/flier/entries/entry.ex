@@ -21,5 +21,12 @@ defmodule Flier.Entries.Entry do
 
   """
 
-  defstruct [:name, :type, path: "."]
+  @enforce_keys [:name, :type, :path]
+  defstruct [:name, :type, :path]
+
+  @type t :: %__MODULE__{
+          name: binary(),
+          type: :file | :directory | :symlink | :other,
+          path: binary()
+        }
 end

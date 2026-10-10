@@ -169,7 +169,7 @@ defmodule Flier.Inotify do
       {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:modify], pid: some_pid)
       {:ok, watcher} = Flier.Inotify.start_watcher("/tmp", [:close], only_dir: true)
   """
-  @spec start_watcher(path :: String.t(), [atom()] | :all, keyword() | pid()) ::
+  @spec start_watcher(path :: binary(), [atom()] | :all, keyword() | pid()) ::
           {:ok, Watcher.t()} | {:error, File.posix() | :unknown}
   def start_watcher(path, mask, opts \\ [])
 
@@ -305,7 +305,7 @@ defmodule Flier.Inotify do
         |> Stream.run()
       end)
   """
-  @spec stream(path :: String.t(), [atom()] | :all, keyword()) :: Enumerable.t(Event.t())
+  @spec stream(path :: binary(), [atom()] | :all, keyword()) :: Enumerable.t(Event.t())
   def stream(path, mask \\ :all, opts \\ []) do
     validate_mask!(mask)
     validate_opts!(opts, @watch_opts)

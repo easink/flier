@@ -118,7 +118,7 @@ defmodule Flier.Entries do
       # Count entries in a directory
       "/usr/bin" |> Flier.Entries.stream() |> Enum.count()
   """
-  @spec stream(path :: String.t(), opts :: keyword()) :: Enumerable.t()
+  @spec stream(path :: binary(), opts :: keyword()) :: Enumerable.t(Flier.Entries.Entry.t())
   def stream(path, opts \\ []) do
     opts = validate_opts!(opts)
 
