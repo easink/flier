@@ -1,7 +1,7 @@
 defmodule Flier.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.4.1"
   @url "https://github.com/easink/flier"
 
   def project do
@@ -30,8 +30,8 @@ defmodule Flier.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.37", optional: true},
-      {:rustler_precompiled, "~> 0.8"},
+      {:rustler, "~> 0.38", optional: true},
+      {:rustler_precompiled, "~> 0.10"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

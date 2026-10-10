@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [features]
 nif_version_2_16 = ["rustler/nif_version_2_16"]
 nif_version_2_17 = ["rustler/nif_version_2_17"]
+nif_version_2_18 = ["rustler/nif_version_2_18"]
 
 [dependencies]
 rustler.workspace = true
