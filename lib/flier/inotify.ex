@@ -42,6 +42,13 @@ defmodule Flier.Inotify do
   |------|-------------|
   | `:ignored` | The watch was removed (directory deleted or unmounted). No further events follow. |
   | `:isdir` | The subject of the event is a directory |
+  | `:unmount` | The file system containing the watched directory was unmounted. Followed by `:ignored`. |
+  | `:q_overflow` | The kernel event queue overflowed and events were lost. Delivered with an empty filename. |
+
+  A `:q_overflow` event means the watcher can no longer be trusted to have
+  seen every change; rescan the directory (e.g. with `Flier.Entries.stream/2`)
+  to resynchronise. The queue size is set by the
+  `fs.inotify.max_queued_events` sysctl.
 
   > #### Filename encoding {: .info}
   >
@@ -91,7 +98,7 @@ defmodule Flier.Inotify do
   ]
 
   # Flags the kernel reports on its own; accepted in a mask but have no effect.
-  @report_only [:ignored, :isdir]
+  @report_only [:ignored, :isdir, :q_overflow, :unmount]
 
   @doc """
   Starts an inotify watcher on `path` for the given event `mask`.

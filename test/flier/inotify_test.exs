@@ -580,6 +580,13 @@ defmodule Flier.InotifyTest do
       end
     end
 
+    test "accepts the report-only :q_overflow and :unmount flags", %{tmp_dir: tmp_dir} do
+      assert {:ok, watcher} =
+               Flier.Inotify.start_watcher(tmp_dir, [:create, :q_overflow, :unmount])
+
+      Flier.Inotify.stop_watcher(watcher)
+    end
+
     test "raises for a mask that is neither a list nor :all", %{tmp_dir: tmp_dir} do
       assert_raise ArgumentError, fn -> Flier.Inotify.start_watcher(tmp_dir, :create) end
     end

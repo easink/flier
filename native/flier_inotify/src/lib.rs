@@ -9,22 +9,7 @@ use std::thread;
 
 rustler::atoms! {
     stopped,
-    // event type
     inotify_event,
-    // inotify events
-    create,
-    modify,
-    delete,
-    moved_from,
-    moved_to,
-    access,
-    close_write,
-    close_nowrite,
-    open,
-    attrib,
-    ignored,
-    isdir,
-    unknown
 }
 
 /// Handle to the background reader thread.
@@ -86,10 +71,14 @@ fn start_watcher(
 ) -> Result<ResourceArc<WatcherResource>, Atom> {
     let inotify = Inotify::init().map_err(|e| errno_atom(env, &e))?;
     let mut watches = inotify.watches();
+    let event_names: Vec<String> = event_list
+        .iter()
+        .filter_map(|atom| atom.to_term(env).atom_to_string().ok())
+        .collect();
     let wd = watches
         .add(
             std::ffi::OsStr::from_bytes(path.as_slice()),
-            build_watch_mask(&event_list),
+            build_watch_mask(event_names.iter().map(String::as_str)),
         )
         .map_err(|e| errno_atom(env, &e))?;
 
@@ -142,14 +131,18 @@ fn read_loop(
             // arbitrary byte sequences, so they are sent as an Erlang binary
             // rather than a lossily converted string.
             let name: &[u8] = event.name.map(|n| n.as_bytes()).unwrap_or_default();
-            let mask_atoms = mask_to_atoms(event.mask);
+            let names = mask_names(event.mask);
 
             let sent = owned_env.send_and_clear(&pid, |env| {
                 let mut bin = rustler::OwnedBinary::new(name.len())
                     .expect("failed to allocate OwnedBinary for filename");
                 bin.as_mut_slice().copy_from_slice(name);
                 let tag = tag_env.run(|tag_env| tag.load(tag_env).in_env(env));
-                (inotify_event(), tag, bin.release(env), mask_atoms).encode(env)
+                let masks: Vec<Atom> = names
+                    .iter()
+                    .map(|name| Atom::from_str(env, name).expect("event names are valid atoms"))
+                    .collect();
+                (inotify_event(), tag, bin.release(env), masks).encode(env)
             });
 
             if sent.is_err() || event.mask.contains(EventMask::IGNORED) {
@@ -172,51 +165,100 @@ fn stop_watcher(resource: ResourceArc<WatcherResource>) -> Atom {
 
 rustler::init!("Elixir.Flier.Inotify.Native");
 
-type AtomFn = fn() -> Atom;
-
-/// Subscribable events: Elixir atom, inotify watch flag, and event flag.
-const EVENTS: [(AtomFn, WatchMask, EventMask); 10] = [
-    (create, WatchMask::CREATE, EventMask::CREATE),
-    (modify, WatchMask::MODIFY, EventMask::MODIFY),
-    (delete, WatchMask::DELETE, EventMask::DELETE),
-    (moved_from, WatchMask::MOVED_FROM, EventMask::MOVED_FROM),
-    (moved_to, WatchMask::MOVED_TO, EventMask::MOVED_TO),
-    (access, WatchMask::ACCESS, EventMask::ACCESS),
-    (attrib, WatchMask::ATTRIB, EventMask::ATTRIB),
-    (close_write, WatchMask::CLOSE_WRITE, EventMask::CLOSE_WRITE),
+/// Subscribable events: Elixir atom name, inotify watch flag, and event flag.
+const EVENTS: [(&str, WatchMask, EventMask); 10] = [
+    ("create", WatchMask::CREATE, EventMask::CREATE),
+    ("modify", WatchMask::MODIFY, EventMask::MODIFY),
+    ("delete", WatchMask::DELETE, EventMask::DELETE),
+    ("moved_from", WatchMask::MOVED_FROM, EventMask::MOVED_FROM),
+    ("moved_to", WatchMask::MOVED_TO, EventMask::MOVED_TO),
+    ("access", WatchMask::ACCESS, EventMask::ACCESS),
+    ("attrib", WatchMask::ATTRIB, EventMask::ATTRIB),
     (
-        close_nowrite,
+        "close_write",
+        WatchMask::CLOSE_WRITE,
+        EventMask::CLOSE_WRITE,
+    ),
+    (
+        "close_nowrite",
         WatchMask::CLOSE_NOWRITE,
         EventMask::CLOSE_NOWRITE,
     ),
-    (open, WatchMask::OPEN, EventMask::OPEN),
+    ("open", WatchMask::OPEN, EventMask::OPEN),
 ];
 
 /// Flags the kernel reports without being subscribed to.
-const REPORT_ONLY: [(AtomFn, EventMask); 2] =
-    [(ignored, EventMask::IGNORED), (isdir, EventMask::ISDIR)];
+const REPORT_ONLY: [(&str, EventMask); 4] = [
+    ("ignored", EventMask::IGNORED),
+    ("isdir", EventMask::ISDIR),
+    ("q_overflow", EventMask::Q_OVERFLOW),
+    ("unmount", EventMask::UNMOUNT),
+];
 
-/// Build the watch mask; unknown atoms are ignored (validated in Elixir).
-fn build_watch_mask(event_atoms: &[Atom]) -> WatchMask {
+/// Build the watch mask; unknown names are ignored (validated in Elixir).
+fn build_watch_mask<'a>(names: impl IntoIterator<Item = &'a str>) -> WatchMask {
+    let names: Vec<&str> = names.into_iter().collect();
+
     EVENTS
         .iter()
-        .filter(|(atom, _, _)| event_atoms.contains(&atom()))
+        .filter(|(name, _, _)| names.contains(name))
         .fold(WatchMask::empty(), |mask, (_, flag, _)| mask | *flag)
 }
 
-fn mask_to_atoms(mask: EventMask) -> Vec<Atom> {
-    let events = EVENTS.iter().map(|(atom, _, flag)| (atom, flag));
-    let report_only = REPORT_ONLY.iter().map(|(atom, flag)| (atom, flag));
+/// Names of the flags set in an event mask, or `["unknown"]` if none is
+/// recognised.
+fn mask_names(mask: EventMask) -> Vec<&'static str> {
+    let events = EVENTS.iter().map(|(name, _, flag)| (*name, *flag));
+    let report_only = REPORT_ONLY.iter().copied();
 
-    let atoms: Vec<Atom> = events
+    let names: Vec<&'static str> = events
         .chain(report_only)
-        .filter(|(_, flag)| mask.contains(**flag))
-        .map(|(atom, _)| atom())
+        .filter(|(_, flag)| mask.contains(*flag))
+        .map(|(name, _)| name)
         .collect();
 
-    if atoms.is_empty() {
-        vec![unknown()]
+    if names.is_empty() {
+        vec!["unknown"]
     } else {
-        atoms
+        names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscribed_events_are_named() {
+        assert_eq!(
+            mask_names(EventMask::CREATE | EventMask::ISDIR),
+            ["create", "isdir"]
+        );
+    }
+
+    #[test]
+    fn queue_overflow_is_reported() {
+        assert_eq!(mask_names(EventMask::Q_OVERFLOW), ["q_overflow"]);
+    }
+
+    #[test]
+    fn unmount_is_reported() {
+        assert_eq!(
+            mask_names(EventMask::UNMOUNT | EventMask::IGNORED),
+            ["ignored", "unmount"]
+        );
+    }
+
+    #[test]
+    fn unrecognised_flags_are_unknown() {
+        assert_eq!(mask_names(EventMask::empty()), ["unknown"]);
+    }
+
+    #[test]
+    fn watch_mask_from_names() {
+        assert_eq!(
+            build_watch_mask(["create", "close_write", "isdir", "bogus"]),
+            WatchMask::CREATE | WatchMask::CLOSE_WRITE
+        );
     }
 }
