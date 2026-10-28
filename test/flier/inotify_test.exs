@@ -384,18 +384,19 @@ defmodule Flier.InotifyTest do
     dir
   end
 
-  # Wait until `pid` is blocked in a receive.
-  defp wait_until_waiting(pid, attempts \\ 100) do
-    case Process.info(pid, :status) do
-      {:status, :waiting} ->
-        :ok
+  # The ref of the watcher of the traced process `pid` on `dir`, learned from
+  # the first event it receives. Files are created until one is seen, as the
+  # process may not have started its watcher yet (it can also be blocked
+  # loading code, so its status alone does not tell).
+  defp traced_watcher_ref(pid, dir, attempt \\ 0) do
+    File.write!(Path.join(dir, "probe#{attempt}"), "")
 
-      _ when attempts > 0 ->
-        Process.sleep(10)
-        wait_until_waiting(pid, attempts - 1)
-
-      other ->
-        flunk("process never blocked: #{inspect(other)}")
+    receive do
+      {:trace, ^pid, :receive, {:inotify_event, ref, %Event{}}} -> ref
+    after
+      100 ->
+        if attempt == 50, do: flunk("the process never received an event")
+        traced_watcher_ref(pid, dir, attempt + 1)
     end
   end
 
@@ -487,9 +488,7 @@ defmodule Flier.InotifyTest do
       # Learn the stream's watcher ref from the first event it receives, then
       # deliver the error a failing watcher would send.
       :erlang.trace(pid, true, [:receive])
-      wait_until_waiting(pid)
-      File.write!(Path.join(tmp_dir, "a.txt"), "x")
-      assert_receive {:trace, ^pid, :receive, {:inotify_event, ref, %Event{name: "a.txt"}}}, 1000
+      ref = traced_watcher_ref(pid, tmp_dir)
       send(pid, {:inotify_error, ref, :eio})
 
       assert_receive {:result, %File.Error{reason: :eio, path: ^tmp_dir} = error}, 1000
