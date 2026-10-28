@@ -36,6 +36,7 @@ version = "0.1.0"
 dependencies = [
  "flier_common",
  "inotify",
+ "libc",
  "rustler",
 ]
 

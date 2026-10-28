@@ -6,6 +6,8 @@ use rustler::{
 };
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io::{self, ErrorKind};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -36,6 +38,9 @@ struct Subscriber {
     tag: (OwnedEnv, SavedTerm),
     /// The events the watcher subscribed to.
     events: EventMask,
+    /// False while the watcher joins a shared watch, so that it is not sent
+    /// the events queued before it subscribed.
+    ready: bool,
 }
 
 /// The inotify instance shared by all watchers, read by a single thread.
@@ -50,11 +55,18 @@ struct Subscriber {
 /// subscribers left it drops the hub, closing the instance, and exits. The
 /// next watcher then starts a new one.
 ///
-/// Events are only sent while holding the hub lock, so once a watcher has
-/// been unsubscribed no further events reach it.
+/// Events are only read from the kernel and sent while holding the hub
+/// lock, so once a watcher has been unsubscribed no further events reach
+/// it. A watcher joining a shared watch first has the events already queued
+/// dispatched to the others, so it is not sent events from before it
+/// started.
 struct Hub {
+    inotify: Inotify,
     watches: Watches,
     subscribers: HashMap<WatchDescriptor, Vec<Subscriber>>,
+    /// An eventfd waking the reader thread when the hub has run out of
+    /// watches without an `IN_IGNORED` left for the reader to see.
+    wake: OwnedFd,
 }
 
 static HUB: Mutex<Option<Hub>> = Mutex::new(None);
@@ -124,6 +136,7 @@ fn start_watcher(
     let tag_env = OwnedEnv::new();
     let tag = tag_env.save(tag);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let joining = hub.subscribers.contains_key(&wd);
 
     hub.subscribers
         .entry(wd.clone())
@@ -133,7 +146,19 @@ fn start_watcher(
             pid,
             tag: (tag_env, tag),
             events: EventMask::from_bits_truncate(events.bits()),
+            ready: !joining,
         });
+
+    if joining {
+        // A read error is left for the reader thread to report.
+        let _ = hub.dispatch_queued(&mut Sender::Nif(env), &mut [0u8; BUFFER_SIZE]);
+        hub.set_ready(&wd, id);
+
+        if hub.subscribers.is_empty() {
+            // The watch was removed while joining it, and that was the last.
+            hub.wake_reader();
+        }
+    }
     drop(guard);
 
     Ok(ResourceArc::new(WatcherResource { id, wd }))
@@ -142,18 +167,30 @@ fn start_watcher(
 /// Create the inotify instance with a first watch on `path`, and its reader
 /// thread. The watch is added first so that no thread is started for a path
 /// that cannot be watched: the thread only exits once a watch is removed.
-fn start_hub(path: &OsStr, mask: WatchMask) -> std::io::Result<(Hub, WatchDescriptor)> {
+fn start_hub(path: &OsStr, mask: WatchMask) -> io::Result<(Hub, WatchDescriptor)> {
     let inotify = Inotify::init()?;
     let mut watches = inotify.watches();
     let wd = watches.add(path, mask)?;
 
+    let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if wake == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `wake` is a newly created file descriptor owned by nothing else.
+    let wake = unsafe { OwnedFd::from_raw_fd(wake) };
+
+    // The thread polls the descriptors without owning them; only it drops
+    // the hub that closes them, after its last poll.
+    let fds = [inotify.as_raw_fd(), wake.as_raw_fd()];
     thread::Builder::new()
         .name("flier_inotify".into())
-        .spawn(move || read_loop(inotify))?;
+        .spawn(move || read_loop(fds))?;
 
     let hub = Hub {
+        inotify,
         watches,
         subscribers: HashMap::new(),
+        wake,
     };
     Ok((hub, wd))
 }
@@ -190,16 +227,58 @@ impl Hub {
         let _ = self.watches.remove(wd.clone());
     }
 
+    /// Read and dispatch the events queued in the kernel until none are left.
+    fn dispatch_queued(&mut self, sender: &mut Sender, buffer: &mut [u8]) -> io::Result<()> {
+        loop {
+            match self.inotify.read_events(buffer) {
+                Ok(events) => {
+                    for event in events {
+                        self.dispatch(sender, &event);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Let a watcher that joined a shared watch receive its events.
+    fn set_ready(&mut self, wd: &WatchDescriptor, id: u64) {
+        let subscribers = self.subscribers.get_mut(wd).into_iter().flatten();
+        if let Some(sub) = subscribers.into_iter().find(|sub| sub.id == id) {
+            sub.ready = true;
+        }
+    }
+
+    fn wake_reader(&self) {
+        let one = 1u64.to_ne_bytes();
+        // Only fails if the counter is about to overflow, which still wakes.
+        let _ = unsafe { libc::write(self.wake.as_raw_fd(), one.as_ptr().cast(), one.len()) };
+    }
+
+    fn clear_wake(&self) {
+        let mut count = [0u8; 8];
+        // Fails with EAGAIN when not woken, which is fine.
+        let _ = unsafe {
+            libc::read(
+                self.wake.as_raw_fd(),
+                count.as_mut_ptr().cast(),
+                count.len(),
+            )
+        };
+    }
+
     /// Send an event to the subscribers that want it.
-    fn dispatch(&mut self, env: &mut OwnedEnv, event: &inotify::Event<&OsStr>) {
+    fn dispatch(&mut self, sender: &mut Sender, event: &inotify::Event<&OsStr>) {
         if event.mask.contains(EventMask::Q_OVERFLOW) {
             // Not tied to a watch: every watcher may have missed events.
             let wds: Vec<WatchDescriptor> = self.subscribers.keys().cloned().collect();
             for wd in &wds {
-                self.deliver(env, wd, event);
+                self.deliver(sender, wd, event);
             }
         } else {
-            self.deliver(env, &event.wd, event);
+            self.deliver(sender, &event.wd, event);
         }
 
         if event.mask.contains(EventMask::IGNORED) {
@@ -212,7 +291,7 @@ impl Hub {
     /// whose process is gone.
     fn deliver(
         &mut self,
-        env: &mut OwnedEnv,
+        sender: &mut Sender,
         wd: &WatchDescriptor,
         event: &inotify::Event<&OsStr>,
     ) {
@@ -224,25 +303,24 @@ impl Hub {
         let name = event.name.map(OsStr::as_bytes).unwrap_or_default();
 
         subscribers.retain(|sub| {
-            !wants(sub.events, event.mask)
-                || env
-                    .send_and_clear(&sub.pid, |env| {
-                        let mut bin = NewBinary::new(env, name.len());
-                        bin.as_mut_slice().copy_from_slice(name);
-                        let masks: Vec<Atom> = names
-                            .iter()
-                            .map(|name| {
-                                Atom::from_str(env, name).expect("event names are valid atoms")
-                            })
-                            .collect();
-                        let msg = Event {
-                            name: bin.into(),
-                            masks,
-                            cookie: event.cookie,
-                        };
-                        (inotify_event(), sub.tag(env), msg).encode(env)
-                    })
-                    .is_ok()
+            // A joining watcher still learns that its watch is gone.
+            let ready = sub.ready || event.mask.contains(EventMask::IGNORED);
+
+            !(ready && wants(sub.events, event.mask))
+                || sender.send(&sub.pid, |env| {
+                    let mut bin = NewBinary::new(env, name.len());
+                    bin.as_mut_slice().copy_from_slice(name);
+                    let masks: Vec<Atom> = names
+                        .iter()
+                        .map(|name| Atom::from_str(env, name).expect("event names are valid atoms"))
+                        .collect();
+                    let msg = Event {
+                        name: bin.into(),
+                        masks,
+                        cookie: event.cookie,
+                    };
+                    (inotify_event(), sub.tag(env), msg).encode(env)
+                })
         });
 
         if subscribers.is_empty() {
@@ -276,38 +354,76 @@ fn wants(subscribed: EventMask, mask: EventMask) -> bool {
     mask.intersects(subscribed | unasked)
 }
 
-/// Blocking read loop run on the reader thread. Exits once no watchers are
-/// left, or on a read error after sending `{:inotify_error, tag, errno}` to
-/// every watcher; either way the hub is dropped.
-fn read_loop(mut inotify: Inotify) {
+/// Where events are sent from: the reader thread, or a NIF call.
+enum Sender<'a> {
+    Thread(&'a mut OwnedEnv),
+    Nif(Env<'a>),
+}
+
+impl Sender<'_> {
+    /// Send the message built by `message`; false if the process is gone.
+    fn send<F>(&mut self, pid: &LocalPid, message: F) -> bool
+    where
+        F: for<'b> FnOnce(Env<'b>) -> Term<'b>,
+    {
+        match self {
+            Sender::Thread(env) => env.send_and_clear(pid, message).is_ok(),
+            Sender::Nif(env) => env.send(pid, message(*env)).is_ok(),
+        }
+    }
+}
+
+/// Size of the buffer events are read into; holds at least one event with
+/// the longest file name.
+const BUFFER_SIZE: usize = 4096;
+
+/// Read loop run on the reader thread: waits for events on the inotify
+/// descriptor or a wake-up on the eventfd in `fds`. Exits once no watchers
+/// are left, or on a read error after sending `{:inotify_error, tag, errno}`
+/// to every watcher; either way the hub is dropped.
+fn read_loop(fds: [RawFd; 2]) {
     let mut env = OwnedEnv::new();
-    let mut buffer = [0u8; 4096];
+    let mut buffer = [0u8; BUFFER_SIZE];
 
     loop {
-        let events = match inotify.read_events_blocking(&mut buffer) {
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            events => events,
-        };
+        let polled = poll_readable(fds);
 
         let mut guard = lock_hub();
         let Some(hub) = guard.as_mut() else {
             return;
         };
 
-        match events {
-            Ok(events) => {
-                for event in events {
-                    hub.dispatch(&mut env, &event);
-                }
-                if !hub.subscribers.is_empty() {
-                    continue;
-                }
-            }
+        hub.clear_wake();
+        let dispatched =
+            polled.and_then(|()| hub.dispatch_queued(&mut Sender::Thread(&mut env), &mut buffer));
+
+        match dispatched {
+            Ok(()) if !hub.subscribers.is_empty() => continue,
+            Ok(()) => {}
             Err(e) => hub.broadcast_error(&mut env, &e),
         }
 
         *guard = None;
         return;
+    }
+}
+
+/// Block until one of `fds` is readable.
+fn poll_readable(fds: [RawFd; 2]) -> io::Result<()> {
+    let mut pollfds = fds.map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    });
+
+    loop {
+        if unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, -1) } >= 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != ErrorKind::Interrupted {
+            return Err(err);
+        }
     }
 }
 

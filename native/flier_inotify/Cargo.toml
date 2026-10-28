@@ -15,4 +15,5 @@ nif_version_2_18 = ["rustler/nif_version_2_18"]
 [dependencies]
 rustler.workspace = true
 flier_common = { path = "../flier_common" }
+libc = "0.2"
 inotify = { version = "0.11", default-features = false }
