@@ -35,6 +35,7 @@ defmodule Flier.MixProject do
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:stream_data, "~> 1.4", only: [:dev, :test]},
       {:tidewave, "~> 0.5", only: :dev},
       {:bandit, "~> 1.0", only: :dev}
     ]
